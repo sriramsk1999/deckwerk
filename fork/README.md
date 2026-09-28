@@ -19,10 +19,13 @@ own branch off `upstream/main`, so the fork only carries what is ours.
 5. `fork/regress.py compare`: renders again and lists the slides that changed,
    with baseline | current | changes images in
    `~/.cache/deckwerk-regress/report/`. Exit status 0 means nothing changed.
-6. `npm run test:unit` and `npm run test:browser`. Known failures on this
-   machine, with or without the fork's commits: `streamingRenditions` (needs
-   ffmpeg-static's binary, which `rebuild.sh` skips) and three `web import`
-   tests in `webElement.test.ts` (font metrics).
+6. `npm run test:unit`, then the Electron tiers on a virtual display so no
+   window opens on the desktop:
+   `env -u WAYLAND_DISPLAY xvfb-run -a -s "-screen 0 1920x1080x24" npm run test:browser`.
+   Known failures on this machine, with or without the fork's commits: three
+   `web import` tests in `webElement.test.ts` (font metrics). Run on the real
+   display, focus- and timing-sensitive suites such as
+   `webElementEditorBrowser` can fail spuriously.
 7. After a rebase, `git push --force-with-lease origin main`.
 
 ## What the fork adds

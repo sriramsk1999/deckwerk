@@ -5,8 +5,9 @@
 # packages' install scripts (so Electron never fetches its binary), and
 # Electron's own unpacker stops after locales/ under Node 26. The binary is
 # fetched with Electron's installer, checked against the checksum Electron
-# ships, and unpacked with unzip. ffmpeg-static is skipped: the app falls
-# back to the system ffmpeg.
+# ships, and unpacked with unzip. ffmpeg-static's download is skipped and the
+# system ffmpeg linked in its place: the app would fall back to it anyway, but
+# the tests spawn ffmpeg-static's path directly.
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -29,5 +30,8 @@ if [ ! -x "$electron/dist/electron" ] || [ "$(cat "$electron/dist/version" 2>/de
   printf electron > "$electron/path.txt"
 fi
 echo "Electron $(cat "$electron/dist/version") ready"
+
+ffmpeg=$(command -v ffmpeg) || { echo "no system ffmpeg on PATH" >&2; exit 1; }
+ln -sf "$ffmpeg" node_modules/ffmpeg-static/ffmpeg
 
 npm run build
