@@ -39,5 +39,10 @@ own branch off `upstream/main`, so the fork only carries what is ours.
   While presenting it loads once the server answers, showing "Waiting for …"
   until then. Previews and Speaker View show the poster instead of a second live
   copy. The mouse drives the scene; keys and the clicker still drive the talk.
+
+  For the poster, start the server and run
+  `fork/live-poster.mjs <deck> <slide number> [name]`: it captures the live
+  element into `<deck>/assets/web/` and prints the path for `data-poster`.
+  Speaker View, PDF export and the waiting state show that still.
 - **KaTeX_Size3 loads in the desktop windows.** Sent upstream as
   vsitzmann/deckwerk#27; drop it here once merged.
