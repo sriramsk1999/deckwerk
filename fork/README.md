@@ -44,5 +44,3 @@ own branch off `upstream/main`, so the fork only carries what is ours.
   `fork/live-poster.mjs <deck> <slide number> [name]`: it captures the live
   element into `<deck>/assets/web/` and prints the path for `data-poster`.
   Speaker View, PDF export and the waiting state show that still.
-- **KaTeX_Size3 loads in the desktop windows.** Sent upstream as
-  vsitzmann/deckwerk#27; drop it here once merged.
