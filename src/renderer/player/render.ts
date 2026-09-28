@@ -901,7 +901,10 @@ function connectLiveWeb(
   box.style.position = 'relative';
   const waiting = document.createElement('div');
   waiting.className = 'live-web-note live-web-waiting';
-  if (el.poster) waiting.style.backgroundImage = `url("${opts.resolveSrc(el.poster)}")`;
+  if (el.poster) {
+    waiting.classList.add('has-poster');
+    waiting.style.backgroundImage = `url("${opts.resolveSrc(el.poster)}")`;
+  }
   const label = document.createElement('span');
   label.textContent = `Waiting for ${el.src}`;
   waiting.appendChild(label);
