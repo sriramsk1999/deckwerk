@@ -9,7 +9,7 @@ import { prepareSlideLinks } from './links.js';
 import { quadraticPath, shapeSvg } from '@shared/shapeSvg.js';
 import { isMediaBorderPaint, typedPropertyOwnsCss } from '@shared/nativeCss.js';
 import { applyTableColumnWidths } from '@shared/paragraphs.js';
-import { isEmbeddableWebSrc } from '@shared/webBridge.js';
+import { isEmbeddableWebSrc, isLoopbackWebUrl } from '@shared/webBridge.js';
 import renderMathInElement from 'katex/contrib/auto-render';
 import 'katex/dist/katex.min.css';
 
@@ -796,6 +796,9 @@ function renderBody(el: SlideElement, opts: RenderOptions): HTMLElement | SVGEle
  * Only deck-relative documents are shown — a remote URL would make the talk
  * depend on the network and let a shared deck load an arbitrary site.
  *
+ * The one exception is a page served live from this machine (`isLoopbackWebUrl`,
+ * say a viser scene): see `connectLiveWeb`.
+ *
  * Preview surfaces (`mediaPreload: 'metadata'`: the editor canvas, the rail,
  * Morph and layout previews) show the poster when there is one and otherwise
  * an inert frame — inert so the editor's own pointer handling keeps working
@@ -811,6 +814,7 @@ function renderWeb(
   box.style.height = '100%';
   box.style.overflow = 'hidden';
   const preview = opts.mediaPreload === 'metadata';
+  const live = isLoopbackWebUrl(el.src);
 
   if (preview && el.poster) {
     const poster = document.createElement('img');
@@ -827,22 +831,31 @@ function renderWeb(
     return box;
   }
 
-  if (!isEmbeddableWebSrc(el.src)) {
+  if (live && preview) {
+    // A live page in every thumbnail would open one server connection per
+    // preview; say what the slide will show instead.
+    box.className = 'web-body live-web-note';
+    box.textContent = `Live page: ${el.src}, shown while presenting`;
+    return box;
+  }
+
+  if (!live && !isEmbeddableWebSrc(el.src)) {
     box.className = 'web-body unsupported-body';
     box.textContent = el.src
-      ? `Web page must be a deck-relative .html file: ${el.src}`
+      ? `Web page must be a deck-relative .html file or a 127.0.0.1/localhost URL: ${el.src}`
       : 'Web page: no document set';
     return box;
   }
 
   const frame = document.createElement('iframe');
   frame.className = 'web-frame';
-  frame.setAttribute('sandbox', 'allow-scripts');
+  frame.setAttribute('sandbox', live && ownOrigin(el.src) ? 'allow-scripts allow-same-origin' : 'allow-scripts');
   frame.setAttribute('referrerpolicy', 'no-referrer');
   frame.setAttribute('allow', '');
   frame.setAttribute('loading', preview ? 'lazy' : 'eager');
   frame.title = el.title || 'Embedded web page';
-  frame.src = opts.resolveSrc(el.src);
+  if (live) connectLiveWeb(box, frame, el, opts);
+  else frame.src = opts.resolveSrc(el.src);
   frame.style.width = '100%';
   frame.style.height = '100%';
   frame.style.border = '0';
@@ -853,6 +866,79 @@ function renderWeb(
   frame.style.pointerEvents = preview || !el.interactive ? 'none' : 'auto';
   box.appendChild(frame);
   return box;
+}
+
+/**
+ * Whether a live page would keep an origin of its own, apart from the page
+ * drawing the slide. Only then may its frame drop the opaque origin: sharing
+ * the host's origin with scripts allowed would let it lift its own sandbox.
+ */
+function ownOrigin(src: string): boolean {
+  return typeof location === 'undefined' || new URL(src).origin !== location.origin;
+}
+
+/**
+ * A page served live from this machine, such as a viser scene. It runs as its
+ * own origin (see `ownOrigin`), because clients like viser's start workers and
+ * open sockets, which an opaque origin cannot; that origin is still foreign to
+ * the deck, so the page gains no reach over it.
+ *
+ * The frame loads once the server answers. Until then the box says what it is
+ * waiting for, over the poster when there is one, so a server not yet started
+ * reads as that rather than as a browser error page.
+ *
+ * Keys stay with the deck. The page has no bridge to forward them, so once a
+ * click lands in it, focus goes straight back to the host: the mouse drives
+ * the scene (drags follow the pointer, not focus) and the keys or clicker
+ * drive the talk.
+ */
+function connectLiveWeb(
+  box: HTMLElement,
+  frame: HTMLIFrameElement,
+  el: Extract<SlideElement, { type: 'web' }>,
+  opts: RenderOptions,
+): void {
+  box.style.position = 'relative';
+  const waiting = document.createElement('div');
+  waiting.className = 'live-web-note live-web-waiting';
+  if (el.poster) waiting.style.backgroundImage = `url("${opts.resolveSrc(el.poster)}")`;
+  const label = document.createElement('span');
+  label.textContent = `Waiting for ${el.src}`;
+  waiting.appendChild(label);
+  box.appendChild(waiting);
+  frame.style.visibility = 'hidden';
+
+  // Stop once the slide has left the stage; a box never put on one gives up
+  // after a few minutes rather than probing forever.
+  let attached = false;
+  let unattachedProbes = 0;
+  const gone = (): boolean => {
+    if (box.isConnected) attached = true;
+    else if (attached || ++unattachedProbes > 300) return true;
+    return false;
+  };
+  const probe = (): void => {
+    if (gone()) return;
+    // An opaque no-cors response still proves something is listening.
+    fetch(el.src, { mode: 'no-cors', cache: 'no-store' }).then(
+      () => {
+        frame.src = el.src;
+        frame.style.visibility = '';
+        waiting.remove();
+      },
+      () => setTimeout(probe, 1000),
+    );
+  };
+  probe();
+
+  const returnKeys = (): void => {
+    if (!frame.isConnected) {
+      if (attached) window.removeEventListener('blur', returnKeys);
+      return;
+    }
+    if (document.activeElement === frame) requestAnimationFrame(() => frame.blur());
+  };
+  window.addEventListener('blur', returnKeys);
 }
 
 /**

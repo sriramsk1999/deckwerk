@@ -9,6 +9,7 @@ import {
   type SlideElement,
 } from './deck.js';
 import { renameRetiredFields } from './fieldAliases.js';
+import { isLoopbackWebUrl } from './webBridge.js';
 
 export const AGENT_PROTOCOL_VERSION = 1 as const;
 
@@ -392,7 +393,9 @@ export function validateDeckIntegrity(deck: Deck, assetExists?: (src: string) =>
       if (elementIds.has(element.id)) errors.push(`Duplicate element id: ${element.id}`);
       elementIds.add(element.id);
       if (assetExists && (element.type === 'image' || element.type === 'video' || element.type === 'web')) {
-        if (!assetExists(element.src)) errors.push(`Missing asset for ${element.id}: ${element.src}`);
+        // A live web page is served, not stored: there is no file to find.
+        const live = element.type === 'web' && isLoopbackWebUrl(element.src);
+        if (!live && !assetExists(element.src)) errors.push(`Missing asset for ${element.id}: ${element.src}`);
         if ((element.type === 'video' || element.type === 'web') && element.poster && !assetExists(element.poster)) {
           errors.push(`Missing poster for ${element.id}: ${element.poster}`);
         }

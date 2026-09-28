@@ -47,4 +47,23 @@ describe('renderer window Content Security Policies', () => {
     const governing = /font-src([^;]*)/i.exec(policy)?.[1] ?? /default-src([^;]*)/i.exec(policy)?.[1] ?? '';
     expect(governing, `${name}: ${policy}`).toMatch(/(^|\s)deck:(\s|$)/);
   });
+
+  // A live web element (a server on this machine) is framed directly, and the
+  // player probes it before loading it. Previews never go live, so only the
+  // windows that present — and the editor's "Interact with page" — need both.
+  it.each(['editor', 'present', 'presenter'].filter((name) => windows.includes(name)))(
+    '%s lets live loopback pages load and be probed',
+    (name) => {
+      const html = readFileSync(join(root, name, 'index.html'), 'utf8');
+      const policy = /http-equiv="Content-Security-Policy"[\s\S]*?content="([^"]*)"/i.exec(html)?.[1];
+      if (!policy) return;
+      const directive = (key: string) =>
+        new RegExp(`${key}([^;]*)`, 'i').exec(policy)?.[1] ?? /default-src([^;]*)/i.exec(policy)?.[1] ?? '';
+      for (const key of ['frame-src', 'connect-src']) {
+        for (const host of ['http://127.0.0.1:\\*', 'http://localhost:\\*']) {
+          expect(directive(key), `${name} ${key}: ${policy}`).toMatch(new RegExp(host));
+        }
+      }
+    },
+  );
 });

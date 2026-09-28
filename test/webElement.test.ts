@@ -6,7 +6,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { emptyDeck, parseDeck, type Deck } from '../src/shared/deck.js';
 import { elementFromNode, slideToHtml, type MeasuredNode } from '../src/shared/htmlSlides.js';
 import {
-  WEB_BRIDGE_MARKER, hasWebBridgeRuntime, injectWebBridgeRuntime, isEmbeddableWebSrc, isWebBridgeAction,
+  WEB_BRIDGE_MARKER, hasWebBridgeRuntime, injectWebBridgeRuntime, isEmbeddableWebSrc, isLoopbackWebUrl,
+  isWebBridgeAction,
 } from '../src/shared/webBridge.js';
 import { referencedAssets } from '../src/main/exportDeck.js';
 import { EXIT_ERROR, EXIT_OK, runAgentCli } from '../src/cli/agentCli.js';
@@ -91,6 +92,17 @@ describe('web element', () => {
       'Missing poster for w: assets/web/missing.png',
     ]);
   });
+
+  it('does not look for a live page on disk, only its poster', () => {
+    const deck = emptyDeck();
+    deck.slides[0].elements.push({
+      id: 'w', type: 'web', x: 0, y: 0, w: 1920, h: 1080, rot: 0, z: 1, opacity: 1, class: [], style: {},
+      src: 'http://127.0.0.1:8080/', poster: 'assets/web/missing.png', interactive: true, title: '',
+    });
+    expect(validateDeckIntegrity(deck, () => false)).toEqual([
+      'Missing poster for w: assets/web/missing.png',
+    ]);
+  });
 });
 
 describe('web bridge', () => {
@@ -103,6 +115,20 @@ describe('web bridge', () => {
     expect(isEmbeddableWebSrc('assets/../deck.json')).toBe(false);
     expect(isEmbeddableWebSrc('assets/figure.png')).toBe(false);
     expect(isEmbeddableWebSrc('')).toBe(false);
+  });
+
+  it('shows live pages only from this machine', () => {
+    expect(isLoopbackWebUrl('http://127.0.0.1:8080/')).toBe(true);
+    expect(isLoopbackWebUrl('http://localhost:8080/?scene=a')).toBe(true);
+    expect(isLoopbackWebUrl('https://localhost/')).toBe(true);
+    expect(isLoopbackWebUrl('http://127.1:8080/')).toBe(true); // the URL parser spells it 127.0.0.1
+    expect(isLoopbackWebUrl('http://192.168.1.4:8080/')).toBe(false);
+    expect(isLoopbackWebUrl('http://127.0.0.1.example.com/')).toBe(false);
+    expect(isLoopbackWebUrl('http://user:pass@127.0.0.1:8080/')).toBe(false);
+    expect(isLoopbackWebUrl('ws://127.0.0.1:8080/')).toBe(false);
+    expect(isLoopbackWebUrl('file:///etc/passwd')).toBe(false);
+    expect(isLoopbackWebUrl('assets/web/page.html')).toBe(false);
+    expect(isLoopbackWebUrl('')).toBe(false);
   });
 
   it('injects the runtime into <head> once, ahead of the page scripts', () => {

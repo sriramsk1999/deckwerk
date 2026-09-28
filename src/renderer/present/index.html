@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta http-equiv="Content-Security-Policy"
-          content="default-src 'self'; font-src 'self' data: deck:; frame-src deck:; img-src 'self' deck: data:; media-src 'self' deck:; style-src 'self' 'unsafe-inline' deck:; script-src 'self'" />
+          content="default-src 'self'; font-src 'self' data: deck:; connect-src 'self' http://127.0.0.1:* http://localhost:* https://127.0.0.1:* https://localhost:*; frame-src deck: http://127.0.0.1:* http://localhost:* https://127.0.0.1:* https://localhost:*; img-src 'self' deck: data:; media-src 'self' deck:; style-src 'self' 'unsafe-inline' deck:; script-src 'self'" />
     <title>Present</title>
     <style>
       html, body { margin: 0; height: 100%; background: #000; overflow: hidden; cursor: none; }
