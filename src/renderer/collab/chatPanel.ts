@@ -382,8 +382,18 @@ export class ChatPanel {
     return Boolean(handle) && message.mentions.includes(handle);
   }
 
+  /** Re-read whether the panel is on screen, after something other than its tab moved it. */
+  refreshVisibility(): void {
+    this.onVisibilityChange();
+  }
+
   private visible(): boolean {
-    return !this.host.hidden && document.visibilityState === 'visible';
+    // Its own tab hides it with `hidden`; folding the whole side panel hides
+    // an ancestor, which only checkVisibility sees.
+    const shown = typeof this.host.checkVisibility === 'function'
+      ? this.host.checkVisibility()
+      : !this.host.hidden;
+    return shown && !this.host.hidden && document.visibilityState === 'visible';
   }
 
   private onVisibilityChange(): void {

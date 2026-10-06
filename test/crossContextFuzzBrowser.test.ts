@@ -148,7 +148,8 @@ type OpName =
   | 'click' | 'shift-click' | 'double-click text' | 'double-click image then text'
   | 'type nonce' | 'bold mid-word' | 'escape' | 'click empty' | 'marquee'
   | 'rail hop' | 'undo' | 'redo' | 'undo round-trip' | 'delete selection'
-  | 'cmd+a' | 'click with stray hover' | 'rail multi-delete' | 'stack key' | 'spelling fix';
+  | 'cmd+a' | 'click with stray hover' | 'rail multi-delete' | 'stack key' | 'spelling fix'
+  | 'toggle side panel';
 
 interface Violation { seed: number; step: number; op: OpName; oracle: string; detail: string }
 
@@ -402,6 +403,9 @@ function chooseOp(next: () => number, pre: CrossState): OpName {
   add('cmd+a', 1);
   add('rail multi-delete', 1);
   add('stack key', 1);
+  // Folding the side panel resizes the canvas under whatever is selected or
+  // being edited; none of it may move or end.
+  add('toggle side panel', 1);
   return pick(next, ops);
 }
 
@@ -654,6 +658,9 @@ async function performOp(
       }
       return 'same';
     }
+    case 'toggle side panel':
+      await session.chord('\\', 'Backslash', 220, MOD);
+      return 'same';
   }
 }
 

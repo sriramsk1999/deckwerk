@@ -21,7 +21,7 @@ import { collabClientDir } from './support/collabClient.js';
  *
  * Appearance → Light in the DeckWerk menu turns the chrome light (the slide
  * keeps its own theme), the menu then ticks Light, and the choice survives a
- * reload.
+ * reload. Likewise the interface font, and the side panel folded away.
  */
 const DECK_ID = 'light';
 
@@ -41,7 +41,7 @@ afterEach(async () => {
   workDir = '';
 });
 
-describe.skipIf(!electronBinary)('light mode', () => {
+describe.skipIf(!electronBinary)('editor chrome preferences', () => {
   it('turns the chrome light from the DeckWerk menu and keeps it across a reload', { timeout: 120_000 }, async () => {
     workDir = await mkdtemp(join(tmpdir(), 'light-'));
     const decksRoot = join(workDir, 'decks');
@@ -79,5 +79,59 @@ describe.skipIf(!electronBinary)('light mode', () => {
     await editor.evaluate('location.reload()');
     await eventually(async () => editor!.evaluate<string | undefined>('document.documentElement.dataset.uiTheme'),
       'theme lost on reload', (theme) => theme === 'light');
+  });
+
+  it('sets the chrome in the system font and folds the side panel away, across a reload', { timeout: 120_000 }, async () => {
+    workDir = await mkdtemp(join(tmpdir(), 'chrome-'));
+    const decksRoot = join(workDir, 'decks');
+    const deckDir = join(decksRoot, DECK_ID);
+    const clientDir = await collabClientDir();
+    const profileDir = join(workDir, 'electron-profile');
+    await mkdir(deckDir, { recursive: true });
+    await mkdir(profileDir, { recursive: true });
+    await saveDeck(deckDir, emptyDeck('Chrome'));
+    server = await startCollabServer({ rootDir: decksRoot, clientDir, host: '127.0.0.1', port: 0 });
+    browser = await launchBrowser(`http://127.0.0.1:${server.port}/?deck=${DECK_ID}&name=Chrome`, profileDir);
+    const target = await findTarget(browser.debugPort, (c) => c.url.includes(`deck=${DECK_ID}`), browser.log);
+    editor = await Cdp.connect(target.webSocketDebuggerUrl!);
+    await eventually(async () => editor!.evaluate<boolean>(`Boolean(document.querySelector('.side-panel-toggle'))`),
+      'no side panel toggle');
+    const fontOf = (selector: string) =>
+      editor!.evaluate<string>(`getComputedStyle(document.querySelector(${JSON.stringify(selector)})).fontFamily`);
+    const sideShown = () => editor!.evaluate<boolean>(`getComputedStyle(document.getElementById('side')).display !== 'none'`);
+    const canvasWidth = () => editor!.evaluate<number>(`document.getElementById('canvas').getBoundingClientRect().width`);
+    const pressed = () => editor!.evaluate<string | null>(`document.querySelector('.side-panel-toggle').getAttribute('aria-pressed')`);
+
+    // Monospace by default; System font switches the chrome's words, not what must line up.
+    expect(await fontOf('#side-tabs button')).toContain('Monaspace');
+    await editor.click('.brand-button', 'the DeckWerk menu');
+    await editor.evaluate(
+      `[...document.querySelectorAll('[role="group"][aria-label="Interface font"] [role="menuitemradio"]')]
+        .find((i) => i.textContent === 'System font').click()`,
+    );
+    expect(await editor.evaluate<string>('document.documentElement.dataset.uiFont')).toBe('system');
+    expect(await fontOf('#side-tabs button')).toContain('system-ui');
+    expect(await fontOf('#status')).toContain('system-ui');
+    expect(await fontOf('.rail-num')).toContain('Monaspace');
+
+    // Ctrl+\ folds the panel; the canvas takes its column.
+    expect(await sideShown()).toBe(true);
+    expect(await pressed()).toBe('true');
+    const before = await canvasWidth();
+    await editor.chord('\\', 'Backslash', 220, 2);
+    await eventually(sideShown, 'side panel still shown', (shown) => !shown);
+    expect(await pressed()).toBe('false');
+    expect(await canvasWidth()).toBeGreaterThan(before + 200);
+
+    await editor.evaluate('location.reload()');
+    await eventually(async () => editor!.evaluate<string | undefined>('document.documentElement.dataset.uiFont'),
+      'font lost on reload', (font) => font === 'system');
+    await eventually(async () => editor!.evaluate<boolean>(`Boolean(document.querySelector('.side-panel-toggle'))`),
+      'no side panel toggle after reload');
+    expect(await sideShown()).toBe(false);
+
+    await editor.click('.side-panel-toggle', 'the side panel toggle');
+    await eventually(sideShown, 'side panel not back', (shown) => shown);
+    expect(await pressed()).toBe('true');
   });
 });

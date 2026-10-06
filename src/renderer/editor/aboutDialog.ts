@@ -1,11 +1,12 @@
 import { appearanceMenuSection } from '../uiTheme.js';
+import { interfaceFontMenuSection } from '../uiFont.js';
 import { createToolbarPicker } from './exportPicker.js';
 
 const ABOUT_DIALOG_ID = 'deckwerk-about';
 
 /**
  * The product wordmark at the leading edge of editor toolbars. It opens the
- * app menu: About, and the editor chrome's appearance — settings that are set
+ * app menu: About, and the editor chrome's appearance and font — settings that are set
  * once rather than reached for while editing, so they stay out of the toolbar.
  */
 export function createDeckWerkButton(): HTMLElement {
@@ -17,6 +18,7 @@ export function createDeckWerkButton(): HTMLElement {
   return createToolbarPicker('DeckWerk', [
     { label: 'About DeckWerk', action: showAboutDialog },
     appearanceMenuSection(),
+    interfaceFontMenuSection(),
   ], { trigger: button });
 }
 

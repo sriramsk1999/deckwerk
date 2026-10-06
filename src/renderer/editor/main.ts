@@ -1,9 +1,11 @@
 import '../player/player.css';
+import { installSidePanelToggle } from './sidePanelToggle.js';
 import '../appChrome.css';
 import './editor.css';
 import '../collab/collab.css';
 import '../lightTheme.css';
 import { applyUiTheme } from '../uiTheme.js';
+import { applyUiFont } from '../uiFont.js';
 import { applyAgentOperations, applyAgentTransaction, type AgentOperation } from '@shared/agent.js';
 import type { Deck, SlideElement } from '@shared/deck.js';
 import { emptyDeck } from '@shared/deck.js';
@@ -64,6 +66,7 @@ import { applySpeakerNotes } from '@shared/speakerNotes.js';
 import { installResponsiveToolbar } from './responsiveToolbar.js';
 
 applyUiTheme();
+applyUiFont();
 
 /**
  * Editor shell: wires the panels to one store, owns the toolbar, the keyboard
@@ -559,6 +562,7 @@ function buildToolbar(): void {
       [{ label: 'Present in Speaker View', action: () => void startPresentation(true) }],
       { variant: 'primary', menuLabel: 'Presentation options' },
     ),
+    sidePanel.button,
   );
 
   bar.append(left, mid, right);
@@ -948,6 +952,19 @@ const themePanel = createThemePanel({
   onEditLayouts: (layout) => designWorkspace.openLayoutEditor(layout),
   onPreviewSlide: (slide, label) => designWorkspace.previewSlideOnCanvas(slide, label),
   onPreviewThemeDraft: (theme) => designWorkspace.previewThemeDraft(theme),
+});
+// The side panel folds away from the toolbar or Mod+\. What follows the
+// active tab (the design preview, build badges) leaves with it and comes back
+// with it.
+const sidePanel = installSidePanelToggle(el('body'), (hidden) => {
+  if (hidden) {
+    themePanel.dismiss();
+    designWorkspace.hide();
+    rail.setDesignLabels(false);
+    canvas.setBuildBadgesVisible(false);
+  } else {
+    showPanel(activePanelId);
+  }
 });
 rail.onSlideActivate = () => {
   themePanel.dismiss();

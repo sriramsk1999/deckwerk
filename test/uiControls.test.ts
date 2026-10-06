@@ -59,8 +59,9 @@ describe('shared editor controls', () => {
     const brand = createDeckWerkButton();
     document.body.appendChild(brand);
     const open = () => brand.querySelector<HTMLButtonElement>('.brand-button')!.click();
-    const radios = () => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
-      .map((item) => `${item.textContent}:${item.getAttribute('aria-checked')}`);
+    const radios = () => [...document.querySelectorAll<HTMLButtonElement>(
+      '[role="group"][aria-label="Appearance"] [role="menuitemradio"]',
+    )].map((item) => `${item.textContent}:${item.getAttribute('aria-checked')}`);
 
     open();
     expect(radios()).toEqual(['System:true', 'Light:false', 'Dark:false']);
@@ -70,6 +71,28 @@ describe('shared editor controls', () => {
     open();
     expect(radios()).toEqual(['System:false', 'Light:true', 'Dark:false']);
     localStorage.removeItem('deckwerk.uiTheme');
+  });
+
+  it('offers the interface font in the wordmark menu, Monospace by default', () => {
+    localStorage.removeItem('deckwerk.uiFont');
+    const brand = createDeckWerkButton();
+    document.body.appendChild(brand);
+    const open = () => brand.querySelector<HTMLButtonElement>('.brand-button')!.click();
+    const radios = () => [...document.querySelectorAll<HTMLButtonElement>(
+      '[role="group"][aria-label="Interface font"] [role="menuitemradio"]',
+    )];
+    const state = () => radios().map((item) => `${item.textContent}:${item.getAttribute('aria-checked')}`);
+
+    open();
+    expect(state()).toEqual(['Monospace:true', 'System font:false']);
+    radios().find((item) => item.textContent === 'System font')!.click();
+    expect(document.documentElement.dataset.uiFont).toBe('system');
+    expect(localStorage.getItem('deckwerk.uiFont')).toBe('system');
+    open();
+    expect(state()).toEqual(['Monospace:false', 'System font:true']);
+    radios().find((item) => item.textContent === 'Monospace')!.click();
+    expect(document.documentElement.dataset.uiFont).toBeUndefined();
+    expect(localStorage.getItem('deckwerk.uiFont')).toBeNull();
   });
 
   it('gives toolbar menus roles and closes after an action', () => {
