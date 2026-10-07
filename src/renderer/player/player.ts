@@ -88,6 +88,8 @@ export interface PlayerOptions {
  */
 const PLAY_RETRY_LIMIT = 12;
 const PLAY_RETRY_DELAY_MS = 400;
+/** A pause this soon after a press on the video is the viewer's, not Chromium's. */
+const VIEWER_PAUSE_WINDOW_MS = 1000;
 
 /** Two typical 24 MP images, with a count fallback when dimensions are unavailable. */
 const IMAGE_WARM_PIXEL_LIMIT = 48_000_000;
@@ -221,6 +223,10 @@ export class Player {
   private playWatched = new WeakSet<HTMLVideoElement>();
   /** Videos whose retry budget ran out mid-load, waiting for `canplay` to try again. */
   private resumeArmed = new WeakSet<HTMLVideoElement>();
+  /** Counts arrivals on a slide; a viewer's pause holds for the visit it was made in. */
+  private visit = 0;
+  private viewerPressedAt = new WeakMap<HTMLVideoElement, number>();
+  private viewerHeld = new WeakMap<HTMLVideoElement, number>();
   private resizeObserver: ResizeObserver;
   /**
    * Decoded-but-idle <video> nodes rescued from slides that left the screen,
@@ -359,7 +365,7 @@ export class Player {
   private onVisibilityChange = (): void => {
     if (document.visibilityState !== 'visible' || this.blanked) return;
     for (const [id, video] of this.intendedVideos()) {
-      if (video.dataset.holdFrame === 'true') continue;
+      if (video.dataset.holdFrame === 'true' || this.heldByViewer(video)) continue;
       // A fresh budget: the pauses that exhausted it were the hidden page's.
       this.playAttempts.delete(id);
       void video.play().catch(() => this.retryPlayback(id, video));
@@ -518,6 +524,7 @@ export class Player {
     // This slide's pictures first, then the next ones'. Clips are held until
     // this slide can paint (the lookahead releases them).
     this.wantMedia({ hold: true });
+    if (this.cursor.slide !== previousSlideIndex) this.visit++;
 
     // A video that appears on consecutive slides (Keynote's "plays across
     // slides") must continue, not restart: keep the playing element itself and
@@ -1859,17 +1866,32 @@ export class Player {
       // Resetting on a real start is what stops a long presentation from
       // exhausting the retry budget on its first hiccup.
       video.addEventListener('playing', () => this.playAttempts.delete(currentId()));
+      // A press on the video itself -- its controls, while presenting -- makes
+      // the pause that follows the viewer's. That pause holds for this visit to
+      // the slide; the keep-alive is for pauses nobody chose.
+      video.addEventListener('pointerdown', () => this.viewerPressedAt.set(video, Date.now()));
+      video.addEventListener('play', () => this.viewerHeld.delete(video));
       video.addEventListener('pause', () => {
+        if (Date.now() - (this.viewerPressedAt.get(video) ?? Number.NEGATIVE_INFINITY) < VIEWER_PAUSE_WINDOW_MS) {
+          this.viewerHeld.set(video, this.visit);
+          return;
+        }
         if (!this.intendedPlaying.has(currentId()) || this.blanked
           || video.dataset.holdFrame === 'true') return;
         this.retryPlayback(currentId(), video);
       });
     }
+    if (this.heldByViewer(video)) return;
     void video.play().catch(() => {
       if (!this.intendedPlaying.has(id) || this.blanked
         || video.dataset.holdFrame === 'true') return;
       this.retryPlayback(id, video);
     });
+  }
+
+  /** Paused by the viewer during this visit to its slide. */
+  private heldByViewer(video: HTMLVideoElement): boolean {
+    return this.viewerHeld.get(video) === this.visit;
   }
 
   private retryPlayback(id: string, video: HTMLVideoElement): void {
@@ -1889,7 +1911,7 @@ export class Player {
         const resume = (): void => {
           this.resumeArmed.delete(video);
           if (!this.intendedPlaying.has(id) || this.blanked || !video.isConnected
-            || video.dataset.holdFrame === 'true') return;
+            || video.dataset.holdFrame === 'true' || this.heldByViewer(video)) return;
           this.playAttempts.delete(id);
           void video.play().catch(() => this.retryPlayback(id, video));
         };
@@ -1904,7 +1926,7 @@ export class Player {
     this.playAttempts.set(id, attempts + 1);
     const timer = setTimeout(() => {
       if (!this.intendedPlaying.has(id) || this.blanked || !video.isConnected
-        || video.dataset.holdFrame === 'true') return;
+        || video.dataset.holdFrame === 'true' || this.heldByViewer(video)) return;
       void video.play().catch(() => {
         if (this.intendedPlaying.has(id) && !this.blanked
           && video.dataset.holdFrame !== 'true') this.retryPlayback(id, video);

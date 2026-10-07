@@ -484,4 +484,26 @@ describe('the Player with clips in memory', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(plays).toBe(spent + 1);
   });
+
+  it('leaves a clip the viewer paused while it was loading paused once it can play', async () => {
+    vi.useFakeTimers();
+    let plays = 0;
+    HTMLMediaElement.prototype.play = function () {
+      plays += 1;
+      return Promise.reject(new DOMException('aborted', 'AbortError'));
+    };
+    const deck = deckWith([[videoElement('v', 'assets/clip.05a38d7a.mp4', { autoplay: true })]]);
+    player = new Player({ deck, container: host, resolveSrc: (src) => `/x/${src}` });
+    await vi.advanceTimersByTimeAsync(20_000);
+    const spent = plays;
+
+    // The viewer pauses it from its controls before its bytes arrive.
+    const video = host.querySelector('video')!;
+    video.dispatchEvent(new Event('pointerdown'));
+    video.dispatchEvent(new Event('pause'));
+    fakeReadyState(video, HTMLMediaElement.HAVE_ENOUGH_DATA);
+    video.dispatchEvent(new Event('canplay'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(plays, 'the clip started under the viewer once it could play').toBe(spent);
+  });
 });
