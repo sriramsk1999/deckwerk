@@ -2630,7 +2630,7 @@ describe('quadratic curved arrows', () => {
       `[data-element-id="${arrow.id}"] svg > path`,
     )!;
     expect(path.getAttribute('d')).toContain(' Q ');
-    expect(path.getAttribute('marker-end')).toContain('arrowhead-');
+    expect(host.querySelectorAll(`[data-element-id="${arrow.id}"] svg > path.arrowhead`)).toHaveLength(1);
     expect(host.querySelector('.handle-curve-control')).not.toBeNull();
   });
 
@@ -2797,6 +2797,8 @@ describe('object creation and manipulation', () => {
     // A toolbar box is a label: it hugs its text instead of being a column.
     expect(text.autoSize).toBe(true);
     expect(text.autoFit).toBeUndefined();
+    // Centred, so a label grows evenly about where it was put.
+    expect(text.align).toBe('center');
   });
 
   it('turns a sized-to-text box into an ordinary one when a handle resizes it', () => {
@@ -3819,5 +3821,154 @@ describe('pointer-ups on chrome laid over the canvas', () => {
     store.beginTransaction('Move or resize objects');
     host.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0 }));
     expect(store.isTransactionActive()).toBe(false);
+  });
+});
+
+describe('resizing pictures and videos', () => {
+  beforeEach(() => document.body.replaceChildren());
+
+  /** Drag `id`'s south-east handle by (dx, dy) on a 1:1 stage. */
+  function dragCorner(id: string, dx: number, dy: number, shiftKey = false) {
+    const { store, host } = setup();
+    store.commit((deck) => {
+      deck.slides[0].elements.push(imageElement());
+      // A cropped video: free to resize before, which surprised people.
+      const video = deck.slides[0].elements.find((e) => e.id === 'video-1');
+      if (video?.type === 'video') video.sourceBox = { x: -20, y: -10, w: 680, h: 380 };
+    });
+    host.querySelector<HTMLElement>('.stage')!.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 1920, height: 1080 }) as DOMRect;
+    store.select([id]);
+    const el = store.slide!.elements.find((e) => e.id === id)!;
+    const start = { x: el.x + el.w, y: el.y + el.h };
+    const handle = host.querySelector<HTMLElement>(`.handle-se[data-element-id="${id}"]`)!;
+    const event = (type: string, x: number, y: number) => new PointerEvent(type, {
+      clientX: x, clientY: y, bubbles: true, pointerId: 1, button: 0, shiftKey,
+    });
+    handle.dispatchEvent(event('pointerdown', start.x, start.y));
+    host.dispatchEvent(event('pointermove', start.x + dx, start.y + dy));
+    host.dispatchEvent(event('pointerup', start.x + dx, start.y + dy));
+    return store.slide!.elements.find((e) => e.id === id)!;
+  }
+
+  it('keeps a video in proportion by default, even a cropped one, and frees it with Shift', () => {
+    expect(dragCorner('video-1', 160, 20)).toMatchObject({ w: 800, h: 450 });
+    expect(dragCorner('video-1', 160, 20, true)).toMatchObject({ w: 800, h: 380 });
+  });
+
+  it('keeps a picture in proportion by default and frees it with Shift', () => {
+    expect(dragCorner('image-1', 200, 10)).toMatchObject({ w: 600, h: 450 });
+    expect(dragCorner('image-1', 200, 10, true)).toMatchObject({ w: 600, h: 310 });
+  });
+
+  it('keeps the pointer on the box\'s edge wherever a corner is dragged', () => {
+    // The picture is 400x300 with its south-east corner at (1600, 600), so
+    // the anchor is (1200, 300). Snapping may pull the box off the pointer by
+    // up to its 6px reach (plus a pixel of rounding), never more.
+    const reach = 7;
+    const offsets = [-500, -380, -260, -140, -20, 100, 220, 340];
+    for (const dx of offsets) {
+      for (const dy of offsets) {
+        const px = 1600 + dx;
+        const py = 600 + dy;
+        const box = dragCorner('image-1', dx, dy);
+        const where = `pointer (${px}, ${py}) -> ${JSON.stringify({ x: box.x, y: box.y, w: box.w, h: box.h })}`;
+        expect([box.x, box.y], where).toEqual([1200, 300]);
+        if (px <= 1200 || py <= 300) {
+          // Past the anchor on either axis: as small as it goes, in proportion.
+          expect([box.w, box.h], where).toEqual([11, 8]);
+          continue;
+        }
+        const right = box.x + box.w;
+        const bottom = box.y + box.h;
+        expect(px, where).toBeLessThanOrEqual(right + reach);
+        expect(py, where).toBeLessThanOrEqual(bottom + reach);
+        expect(Math.min(Math.abs(right - px), Math.abs(bottom - py)), where).toBeLessThanOrEqual(reach);
+        expect(box.w / box.h, where).toBeCloseTo(4 / 3, 1);
+        // Freed with Shift, the corner is under the pointer, or at the minimum.
+        const free = dragCorner('image-1', dx, dy, true);
+        expect(Math.abs(free.x + free.w - Math.max(px, 1208)), where).toBeLessThanOrEqual(reach);
+        expect(Math.abs(free.y + free.h - Math.max(py, 308)), where).toBeLessThanOrEqual(reach);
+      }
+    }
+  });
+
+  it('still resizes a text box freely, with Shift to keep its proportions', () => {
+    expect(dragCorner('text-1', 200, 60)).toMatchObject({ w: 800, h: 180 });
+    // 60 of 120 is more of the height than 200 of 600 is of the width, so
+    // the height leads and the box reaches the pointer.
+    expect(dragCorner('text-1', 200, 60, true)).toMatchObject({ w: 900, h: 180 });
+  });
+});
+
+describe('stacking order keys', () => {
+  beforeEach(() => document.body.replaceChildren());
+
+  const press = (code: 'BracketLeft' | 'BracketRight', shiftKey = false) => document.body.dispatchEvent(
+    new KeyboardEvent('keydown', {
+      code, key: code === 'BracketLeft' ? (shiftKey ? '{' : '[') : (shiftKey ? '}' : ']'),
+      shiftKey, bubbles: true, cancelable: true,
+    }),
+  );
+  /** Ids bottom to top. */
+  const stack = (store: ReturnType<typeof setup>['store']) => [...store.slide!.elements]
+    .sort((a, b) => a.z - b.z).map((e) => e.id);
+
+  it('steps with [ and ], goes to the back and front with Shift, each one undo step', () => {
+    const { store } = setup();
+    store.commit((deck) => deck.slides[0].elements.push(imageElement()));
+    bindEditorKeys(shellDeps(store), noopClipboard());
+    expect(stack(store)).toEqual(['text-1', 'video-1', 'image-1']);
+    store.select(['text-1']);
+
+    press('BracketRight');
+    expect(stack(store)).toEqual(['video-1', 'text-1', 'image-1']);
+    expect(store.history()[0]?.label).toBe('Bring forward');
+    press('BracketRight', true);
+    expect(stack(store)).toEqual(['video-1', 'image-1', 'text-1']);
+    press('BracketLeft');
+    expect(stack(store)).toEqual(['video-1', 'text-1', 'image-1']);
+    press('BracketLeft', true);
+    expect(stack(store)).toEqual(['text-1', 'video-1', 'image-1']);
+    store.undo();
+    expect(stack(store)).toEqual(['video-1', 'text-1', 'image-1']);
+  });
+
+  it('leaves brackets alone while typing into a field', () => {
+    const { store } = setup();
+    bindEditorKeys(shellDeps(store), noopClipboard());
+    store.select(['text-1']);
+    const input = document.createElement('input');
+    document.body.appendChild(input);
+    input.dispatchEvent(new KeyboardEvent('keydown', { code: 'BracketRight', key: ']', bubbles: true, cancelable: true }));
+    expect(stack(store)).toEqual(['text-1', 'video-1']);
+  });
+});
+
+describe('shape fill style', () => {
+  beforeEach(() => document.body.replaceChildren());
+
+  it('offers None, which clears the fill, and Solid brings back a theme colour', () => {
+    const { store } = setup();
+    const shape = insertShape(store, 'rect');
+    const panel = document.createElement('div');
+    document.body.appendChild(panel);
+    new Inspector(panel, store).render();
+    const style = () => [...panel.querySelectorAll<HTMLLabelElement>('label.field')]
+      .find((field) => field.querySelector('span')?.textContent === 'Fill style')!
+      .querySelector('select')!;
+    const current = () => store.slide!.elements.find((e) => e.id === shape.id) as Extract<SlideElement, { type: 'shape' }>;
+    expect([...style().options].map((o) => o.value)).toEqual(['None', 'Solid', 'Linear gradient', 'Radial gradient']);
+    expect(style().value).toBe('Solid');
+
+    style().value = 'None';
+    style().dispatchEvent(new Event('change'));
+    expect(current().fill).toBeNull();
+    expect(current().fillGradient ?? null).toBeNull();
+    expect(style().value).toBe('None');
+
+    style().value = 'Solid';
+    style().dispatchEvent(new Event('change'));
+    expect(current().fill).toBe(shape.fill);
   });
 });

@@ -286,6 +286,12 @@ const ShapeElement = BaseElement.extend({
     .default(null),
   arrowStart: z.boolean().default(false),
   arrowEnd: z.boolean().default(false),
+  /**
+   * Arrowhead length in the shape's own units (canvas pixels for a line).
+   * Absent means six times the stroke width. A head is never drawn shorter
+   * than the line is wide: at that size the line simply ends in a point.
+   */
+  arrowSize: z.number().positive().optional(),
   /** Absolute canvas-space control point for an editable quadratic curve. */
   control: z.object({ x: z.number(), y: z.number() }).nullable().optional(),
   /**

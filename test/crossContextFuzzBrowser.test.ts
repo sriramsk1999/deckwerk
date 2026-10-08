@@ -70,6 +70,14 @@ function random(seed: number): () => number {
   };
 }
 
+/**
+ * Element ids an op legitimately created and then undid within itself — the
+ * blank slide a confirmed whole-deck delete leaves. A later redo, in this walk
+ * or (the walks share one history) a later one, may bring them back, and that
+ * is not undo materialising something new.
+ */
+const producedIds = new Set<string>();
+
 const pick = <T,>(next: () => number, list: T[]): T =>
   list[Math.floor(next() * list.length)];
 
@@ -140,7 +148,7 @@ type OpName =
   | 'click' | 'shift-click' | 'double-click text' | 'double-click image then text'
   | 'type nonce' | 'bold mid-word' | 'escape' | 'click empty' | 'marquee'
   | 'rail hop' | 'undo' | 'redo' | 'undo round-trip' | 'delete selection'
-  | 'cmd+a' | 'click with stray hover' | 'rail multi-delete';
+  | 'cmd+a' | 'click with stray hover' | 'rail multi-delete' | 'stack key';
 
 interface Violation { seed: number; step: number; op: OpName; oracle: string; detail: string }
 
@@ -214,7 +222,7 @@ describe.skipIf(!electronBinary)('cross-context fuzz over three elements and two
           break;
         }
         if (censusMode === 'resync') {
-          const foreign = ids.filter((id) => !everKnown.has(id));
+          const foreign = ids.filter((id) => !everKnown.has(id) && !producedIds.has(id));
           if (foreign.length > 0) {
             flag('census', `undo/redo materialised never-seen elements: [${foreign.join(', ')}]`);
             break;
@@ -392,6 +400,7 @@ function chooseOp(next: () => number, pre: CrossState): OpName {
   if (pre.editing === null && pre.selection.length > 0) add('delete selection', 2);
   add('cmd+a', 1);
   add('rail multi-delete', 1);
+  add('stack key', 1);
   return pick(next, ops);
 }
 
@@ -546,6 +555,18 @@ async function performOp(
       const expected = (await session.allElementIds());
       return expected;
     }
+    case 'stack key': {
+      // [ ] restack the selection, but inside a text edit they are text: the
+      // character goes into the box and nothing moves in the stack.
+      const stacking = () => session.cdp.evaluate<string>(`JSON.stringify(window.store.slide.elements.map((e) => [e.id, e.z]))`);
+      const before = await stacking();
+      await session.stackKey(next() < 0.5, next() < 0.5);
+      if (pre.editing !== null) {
+        const after = await stacking();
+        if (after !== before) flag('routing', `a bracket typed into ${pre.editing} restacked the slide: ${before} -> ${after}`);
+      }
+      return 'same';
+    }
     case 'cmd+a':
       await session.chord('a', 'KeyA', 65, MOD, pre.editing !== null ? ['selectAll'] : undefined);
       return 'same';
@@ -594,6 +615,7 @@ async function performOp(
       await wait(250);
       const slides = await session.cdp.evaluate<number>('window.store.get().deck.slides.length');
       if (slides !== 1) flag('census', `confirming deletion of the whole deck left ${slides} slides, not one blank slide`);
+      for (const id of await session.allElementIds()) producedIds.add(id);
       await session.chord('z', 'KeyZ', 90, MOD);
       await wait(300);
       if (await snapshot() !== before) {

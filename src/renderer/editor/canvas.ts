@@ -149,6 +149,8 @@ function isCommandModifierKey(key: string): boolean {
 }
 
 const SNAP_SCREEN_PX = 6;
+/** The smallest a resize handle makes a box, in canvas pixels. */
+const MIN_RESIZE = 8;
 /** Forgiving screen-space target around a visible line or arrow. */
 const LINE_HIT_SCREEN_PX = 8;
 /** Screen-pixel movement before a press becomes a drag rather than a click. */
@@ -612,6 +614,8 @@ type MoveOrigin = Rect & { control?: { x: number; y: number } };
 type ResizeOrigin = Rect & {
   rot: number;
   sourceBox?: Rect | null;
+  /** Media's `fit` when the drag began, put back if Shift is let go mid-drag. */
+  fit?: 'cover' | 'contain' | 'fill';
   control?: { x: number; y: number } | null;
 };
 
@@ -625,7 +629,6 @@ type DragMode =
       origin: Rect;
       origins: Map<string, ResizeOrigin>;
       elementId: string;
-      aspect: number;
     }
   | {
       kind: 'table-column-resize';
@@ -672,6 +675,8 @@ export class EditorCanvas {
   private overlay: HTMLElement;
   private zoomInput: HTMLInputElement;
   private tableHeightSyncPending = false;
+  /** Content-size passes run since the last frame; see scheduleTableHeightSync. */
+  private tableHeightSyncPassesThisFrame = 0;
 
   /** Final canvas-pixel to screen-pixel scale (fit scale × user zoom). */
   private scale = 1;
@@ -1199,44 +1204,87 @@ export class EditorCanvas {
    * Keep content-sized frames tight around what they hold: native tables
    * around their laid-out rows, and text boxes sized to their text around
    * their text.
+   *
+   * The pass runs as a microtask: after the render that queued it, but
+   * before the browser paints. A frame later was too late — every render
+   * from a deck holding a stale size (a toggle, a collaborator's echo, a
+   * reload) painted that size for one frame before the fit corrected it,
+   * which is the flicker. Passes that keep queueing passes are capped per
+   * frame, so a measurement that never settled would cost a frame per step
+   * rather than hang the page.
    */
   private scheduleTableHeightSync(): void {
     if (this.tableHeightSyncPending) return;
     this.tableHeightSyncPending = true;
-    requestAnimationFrame(() => {
+    const run = () => {
       this.tableHeightSyncPending = false;
-      if (this.editingId) return;
-      const slide = this.store.slide;
-      if (!slide) return;
-      const heights = new Map<string, number>();
-      const boxes = new Map<string, { x: number; w: number; h: number }>();
-      for (const element of slide.elements) {
-        if (element.type === 'text' && element.autoSize && !element.table) {
-          const node = this.slideLayer.querySelector<HTMLElement>(
-            `[data-element-id="${CSS.escape(element.id)}"]`,
-          );
-          const box = node ? measureTextToSize(node, element) : null;
-          if (box) boxes.set(element.id, box);
+      this.syncContentSizes();
+    };
+    if (this.tableHeightSyncPassesThisFrame >= 8) {
+      requestAnimationFrame(run);
+      return;
+    }
+    if (this.tableHeightSyncPassesThisFrame++ === 0) {
+      requestAnimationFrame(() => { this.tableHeightSyncPassesThisFrame = 0; });
+    }
+    queueMicrotask(run);
+  }
+
+  private syncContentSizes(): void {
+    const slide = this.store.slide;
+    if (!slide) return;
+    const heights = new Map<string, number>();
+    const boxes = new Map<string, { x: number; w: number; h: number }>();
+    for (const element of slide.elements) {
+      if (element.type === 'text' && element.autoSize && !element.table) {
+        const node = this.slideLayer.querySelector<HTMLElement>(
+          `[data-element-id="${CSS.escape(element.id)}"]`,
+        );
+        if (!node) continue;
+        // The box being typed into owns its size: it travels with the text
+        // commits. A render may still have put the stored size back on the
+        // node (a commit that has not caught up with the last keystrokes),
+        // so the live size goes back on with it. Every other box fits as usual.
+        if (element.id === this.editingId) {
+          this.followTextSizeWhileEditing(node, element.id);
           continue;
         }
-        if (element.type !== 'text' || !element.table?.autoHeight || element.autoFit) continue;
+        const box = measureTextToSize(node, element);
+        if (box) boxes.set(element.id, box);
+        continue;
+      }
+      if (this.editingId) continue;
+      if (element.type !== 'text' || !element.table?.autoHeight || element.autoFit) continue;
         const table = this.slideLayer.querySelector<HTMLTableElement>(
           `[data-element-id="${CSS.escape(element.id)}"] .text-content > table`,
         );
-        const height = Math.ceil(table?.offsetHeight ?? 0);
-        if (height >= 8 && Math.abs(height - element.h) > 1) heights.set(element.id, height);
+      const height = Math.ceil(table?.offsetHeight ?? 0);
+      if (height >= 8 && Math.abs(height - element.h) > 1) heights.set(element.id, height);
+    }
+    if (heights.size === 0 && boxes.size === 0) return;
+    this.store.commit((deck) => {
+      const current = deck.slides[this.store.get().slideIndex];
+      for (const element of current?.elements ?? []) {
+        const height = heights.get(element.id);
+        if (height !== undefined) element.h = height;
+        const box = boxes.get(element.id);
+        if (box) Object.assign(element, box);
       }
-      if (heights.size === 0 && boxes.size === 0) return;
-      this.store.commit((deck) => {
-        const current = deck.slides[this.store.get().slideIndex];
-        for (const element of current?.elements ?? []) {
-          const height = heights.get(element.id);
-          if (height !== undefined) element.h = height;
-          const box = boxes.get(element.id);
-          if (box) Object.assign(element, box);
-        }
-      }, { label: 'Fit text box', measurement: true });
-    });
+    }, { label: 'Fit text box', measurement: true });
+  }
+
+  /**
+   * The size a text box sized to its text takes with what its node now
+   * holds, written onto `target` — the copy a text commit is changing — so
+   * the box's new size is part of the same edit as the words that made it.
+   */
+  private fitEditedText(target: SlideElement): void {
+    if (target.type !== 'text' || !target.autoSize || target.table) return;
+    const node = this.slideLayer.querySelector<HTMLElement>(
+      `[data-element-id="${CSS.escape(target.id)}"]`,
+    );
+    const box = node ? measureTextToSize(node, target) : null;
+    if (box) Object.assign(target, box);
   }
 
   /** Re-measure one table during its active resize transaction. */
@@ -2329,7 +2377,10 @@ export class EditorCanvas {
             h: selected.h,
             rot: selected.rot,
             ...((selected.type === 'image' || selected.type === 'video')
-              ? { sourceBox: selected.sourceBox ? { ...selected.sourceBox } : null }
+              ? {
+                sourceBox: selected.sourceBox ? { ...selected.sourceBox } : null,
+                fit: selected.fit,
+              }
               : {}),
             ...((selected.type === 'shape' && selected.control)
               ? { control: { ...selected.control } }
@@ -2343,7 +2394,6 @@ export class EditorCanvas {
           origin: { x: el.x, y: el.y, w: el.w, h: el.h },
           origins,
           elementId: el.id,
-          aspect: el.w / el.h,
         };
         return;
       }
@@ -2636,16 +2686,19 @@ export class EditorCanvas {
           if (edges.bottom) rect.h = o.h + dy;
         }
 
-        // Shift constrains, and so does "Keep aspect ratio" on media — with it
-        // off (fit: fill) a resize genuinely stretches the picture.
-        const keepAspect =
-          (resizing?.type === 'image' || resizing?.type === 'video') &&
-          // A circular mask is square by construction; a free resize would
-          // stretch it back into the ellipse this is meant to avoid.
-          (resizing.maskShape === 'circle' ||
-            (resizing.fit !== 'fill' && !resizing.sourceBox));
-        const constrained = ev.shiftKey || keepAspect;
-        if (constrained) rect = constrainAspect(rect, o, edges, drag.aspect);
+        // Pictures and videos keep their proportions unless Shift is held, the
+        // way Keynote and Figma resize media; everything else resizes freely
+        // unless Shift is held. A circular mask is square by construction, so
+        // it never frees: a free resize would stretch it back into an ellipse.
+        const media = resizing?.type === 'image' || resizing?.type === 'video';
+        const constrained = media
+          ? resizing.maskShape === 'circle' || !ev.shiftKey
+          : ev.shiftKey;
+        // Where the pointer is: the box a free resize would make.
+        const pointerRect = rect;
+        rect = constrained
+          ? constrainAspect(rect, o, edges)
+          : clampResize(rect, o, edges);
 
         // Guides align to what is on screen, which for a rotated neighbour is
         // its rotated bounding box, not its unrotated one.
@@ -2656,14 +2709,13 @@ export class EditorCanvas {
         // nothing meaningful to snap them to; snapping it would only nudge the
         // box away from the pointer. Alt suspends snapping outright.
         const snapped = ev.altKey || radians
-          ? { rect, guides: [], spacing: [], sizes: [] }
-          : snapResize(rect, edges, deck.canvas, others, threshold);
+          ? { rect, guides: [] }
+          : constrained
+            ? snapAspectResize(rect, pointerRect, o, edges, deck.canvas, others, threshold)
+            : snapResize(rect, edges, deck.canvas, others, threshold);
         this.guides = snapped.guides;
 
         let r = { ...snapped.rect };
-        // Snapping moves a single edge, which breaks the ratio the constraint
-        // just imposed. Re-impose it so a keep-aspect resize cannot distort.
-        if (constrained) r = constrainAspect(r, o, edges, drag.aspect);
         if (centered) {
           // Aspect constraints and snapping anchor the opposite corner, which
           // would drift the center — pin it back to where the drag started.
@@ -2722,6 +2774,11 @@ export class EditorCanvas {
               w: Math.max(1, Math.round(origin.sourceBox.w * fx)),
               h: Math.max(1, Math.round(origin.sourceBox.h * fy)),
             };
+          } else if ((el.type === 'image' || el.type === 'video') && origin.fit) {
+            // Shift frees a picture's proportions, and a freed picture squashes
+            // with its box: it fills the box exactly, so the box is the picture.
+            // Letting go of Shift mid-drag gives it back the fit it had.
+            el.fit = ev.shiftKey ? 'fill' : origin.fit;
           }
           if (el.type === 'shape' && origin.control) {
             const control = resizePointByScale(origin.control, origin, resized, scaleX, scaleY);
@@ -3392,6 +3449,7 @@ export class EditorCanvas {
           target.html = html;
           // Same placeholder retirement as the seal (see sealTextChunk).
           target.class = target.class.filter((name) => name !== 'placeholder');
+          this.fitEditedText(target);
         }
       }, { label: 'Edit text', transient: true, coalesceKey });
       this.textEditStoreBase = html;
@@ -3457,6 +3515,7 @@ export class EditorCanvas {
             // re-entered editing, re-stripped the class, and no number of
             // Ctrl/Cmd+Z presses ever reached the text.
             target.class = target.class.filter((name) => name !== 'placeholder');
+            this.fitEditedText(target);
           }
         }, { label: 'Edit text', coalesceKey, historyGroup: `text:${elementId}` });
         this.textEditStoreBase = html;
@@ -5018,6 +5077,9 @@ export class EditorCanvas {
       // mode; plain text is left in place because restoreRenderedForm detects
       // identical markup.
       this.restoreRenderedForm(current, body);
+      // Nothing re-renders, so nothing else would fit a box sized to its text
+      // to the text it was left holding.
+      this.scheduleTableHeightSync();
       // Live formatting/table commits already recorded the authored change.
       // Do not add a second no-op history entry when edit mode finishes; one
       // real Ctrl/Cmd+Z must undo one real formatting click.
@@ -5029,6 +5091,7 @@ export class EditorCanvas {
       if (el) {
         el.html = html;
         el.class = el.class.filter((name) => name !== 'placeholder');
+        this.fitEditedText(el);
       }
     }, { label: 'Edit text', coalesceKey, historyGroup: `text:${elementId}` });
   }
@@ -5709,6 +5772,7 @@ export class EditorCanvas {
         // A formatting click is a real edit too: retire placeholder status
         // inside this entry (see sealTextChunk for the undo-jam this avoids).
         target.class = target.class.filter((name) => name !== 'placeholder');
+        this.fitEditedText(target);
       }
     }, { label, coalesceKey, historyGroup: `text:${elementId}` });
     this.textEditStoreBase = html;
@@ -7187,27 +7251,87 @@ function intersects(a: Rect, b: Rect): boolean {
   return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 }
 
-/**
- * Force a resize back onto the original aspect ratio, keeping the anchor corner
- * (the one opposite the handle) fixed.
- */
-function constrainAspect(
-  rect: Rect,
-  origin: Rect,
-  edges: { left: boolean; right: boolean; top: boolean; bottom: boolean },
-  aspect: number,
-): Rect {
-  const out = { ...rect };
-  // Drive from whichever dimension the handle changed more, so the box tracks
-  // the cursor rather than snapping to one axis.
-  const dw = Math.abs(rect.w - origin.w);
-  const dh = Math.abs(rect.h - origin.h);
-  if (dw >= dh) out.h = out.w / aspect;
-  else out.w = out.h * aspect;
+type Edges = { left: boolean; right: boolean; top: boolean; bottom: boolean };
 
+/** Keep `rect` at its size but put it back against the anchor (opposite) edges. */
+function anchored(rect: Rect, origin: Rect, edges: Edges): Rect {
+  const out = { ...rect };
   if (edges.left) out.x = origin.x + origin.w - out.w;
   if (edges.top) out.y = origin.y + origin.h - out.h;
   return out;
+}
+
+/**
+ * A free resize, held at the minimum size on every axis the handle moves. A
+ * pointer dragged past the opposite edge leaves the box at its smallest
+ * rather than turning it inside out.
+ */
+function clampResize(rect: Rect, origin: Rect, edges: Edges): Rect {
+  const out = { ...rect };
+  if ((edges.left || edges.right) && out.w < MIN_RESIZE) out.w = Math.min(MIN_RESIZE, origin.w);
+  if ((edges.top || edges.bottom) && out.h < MIN_RESIZE) out.h = Math.min(MIN_RESIZE, origin.h);
+  return anchored(out, origin, edges);
+}
+
+/**
+ * Put a resize back on the original proportions, anchored at the edges
+ * opposite the handle. `rect` is the box a free resize would have made — the
+ * pointer is on its moving edges — and the result is the smallest box in
+ * proportion that still reaches the pointer: the larger of the two scales, so
+ * the pointer always sits on the box's boundary, never outside it. Dragging a
+ * corner past the anchor on either axis is a box of negative size; that holds
+ * the box at its minimum. `drive` scales from one axis's size instead (a snap
+ * that has just set it).
+ */
+function constrainAspect(rect: Rect, origin: Rect, edges: Edges, drive?: 'x' | 'y'): Rect {
+  const sx = rect.w / origin.w;
+  const sy = rect.h / origin.h;
+  const movesX = edges.left || edges.right;
+  const movesY = edges.top || edges.bottom;
+  let scale: number;
+  if (drive) scale = drive === 'x' ? sx : sy;
+  else if (movesX && movesY) scale = Math.min(sx, sy) <= 0 ? 0 : Math.max(sx, sy);
+  else scale = movesX ? sx : sy;
+  scale = Math.max(scale, Math.min(1, MIN_RESIZE / Math.min(origin.w, origin.h)));
+  return anchored({ ...rect, w: origin.w * scale, h: origin.h * scale }, origin, edges);
+}
+
+/**
+ * Snap a keep-aspect resize. Snapping one edge on its own would break the
+ * ratio, and re-imposing the ratio from the other axis would throw the snap
+ * away while its guide stayed up. So each moving axis is snapped on its own
+ * and the whole box is scaled to that axis's snap. A snap may pull the box
+ * off the pointer by no more than the snap distance: the pointer rides the
+ * leading edge (the one `constrainAspect` scaled from), so a snap on the other
+ * axis counts by how far it moves the leading edge — on a wide picture a few
+ * pixels of height are many of width. The candidate that moves it least wins.
+ */
+function snapAspectResize(
+  rect: Rect,
+  pointerRect: Rect,
+  origin: Rect,
+  edges: Edges,
+  canvas: { w: number; h: number },
+  others: Rect[],
+  threshold: number,
+): { rect: Rect; guides: SnapLine[] } {
+  const lead: 'x' | 'y' = Math.abs(rect.w - pointerRect.w) <= Math.abs(rect.h - pointerRect.h) ? 'x' : 'y';
+  let best: { rect: Rect; guides: SnapLine[]; cost: number } | null = null;
+  for (const axis of ['x', 'y'] as const) {
+    const moving = axis === 'x' ? edges.left || edges.right : edges.top || edges.bottom;
+    if (!moving) continue;
+    const only = axis === 'x'
+      ? { ...edges, top: false, bottom: false }
+      : { ...edges, left: false, right: false };
+    const { rect: snapped, guides } = snapResize(rect, only, canvas, others, threshold, MIN_RESIZE);
+    const next = constrainAspect(snapped, origin, edges, axis);
+    const cost = lead === 'x' ? Math.abs(next.w - rect.w) : Math.abs(next.h - rect.h);
+    // Neither an alignment nor a size match: this axis has nothing to offer.
+    if (guides.length === 0 && (axis === 'x' ? snapped.w === rect.w : snapped.h === rect.h)) continue;
+    if (cost > threshold || (best && best.cost <= cost)) continue;
+    best = { rect: next, guides, cost };
+  }
+  return best ?? { rect, guides: [] };
 }
 
 /**

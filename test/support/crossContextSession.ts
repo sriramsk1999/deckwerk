@@ -237,6 +237,8 @@ export interface CrossSession {
   chord(key: string, code: string, virtualKey: number, modifiers: number,
     commands?: string[]): Promise<void>;
   type(value: string): Promise<void>;
+  /** A real [ or ] key (with Shift: { or }), carrying both its physical code and its character. */
+  stackKey(right: boolean, shift: boolean): Promise<void>;
   state(): Promise<CrossState>;
   /** Invariant violations that survive a short settle window. */
   problems(): Promise<string[]>;
@@ -301,7 +303,7 @@ export async function startCrossSession(deckId: string, name: string): Promise<{
   ), 'the cross-context fixture never loaded');
   await cdp.evaluate(ERROR_TRAP);
 
-  const session = buildSession(cdp);
+  const session = buildSession(cdp, deck.slides);
   return {
     session,
     close: async () => {
@@ -316,7 +318,7 @@ export async function startCrossSession(deckId: string, name: string): Promise<{
   };
 }
 
-function buildSession(cdp: Cdp): CrossSession {
+function buildSession(cdp: Cdp, startingSlides: unknown[]): CrossSession {
   const session: CrossSession = {
     cdp,
     async reset() {
@@ -329,8 +331,19 @@ function buildSession(cdp: Cdp): CrossSession {
       }
       await cdp.evaluate(`(() => {
         window.store.commit((deck) => {
-          deck.slides[0].elements = ${JSON.stringify(startingElements())};
-          deck.slides[1].elements = ${JSON.stringify([secondSlideElement()])};
+          const starting = ${JSON.stringify(startingSlides)};
+          // A walk may have confirmed deleting both slides and then redone
+          // that after its undo, which legitimately leaves one blank slide
+          // with a new id: then the slide list itself is rebuilt. Otherwise
+          // only the fixture slides' objects are, so a suite that added
+          // slides of its own keeps them.
+          if (starting.some((slide) => !deck.slides.some((s) => s.id === slide.id))) {
+            deck.slides = starting;
+            return;
+          }
+          for (const slide of starting) {
+            deck.slides.find((s) => s.id === slide.id).elements = slide.elements;
+          }
         }, { label: 'Cross-context fixture' });
         window.store.selectSlide(0);
         window.store.clearSelection();
@@ -422,6 +435,20 @@ function buildSession(cdp: Cdp): CrossSession {
     async type(value) {
       await cdp.typeKeys(value);
       await wait(60);
+    },
+    async stackKey(right, shift) {
+      const character = right ? (shift ? '}' : ']') : (shift ? '{' : '[');
+      const key = {
+        key: character,
+        code: right ? 'BracketRight' : 'BracketLeft',
+        windowsVirtualKeyCode: right ? 221 : 219,
+        nativeVirtualKeyCode: right ? 221 : 219,
+        modifiers: shift ? 8 : 0,
+      };
+      await cdp.call('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...key });
+      await cdp.call('Input.dispatchKeyEvent', { type: 'char', text: character, unmodifiedText: character, ...key });
+      await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', ...key });
+      await wait(80);
     },
     state() {
       return cdp.evaluate<CrossState>(`(${STATE})()`);
