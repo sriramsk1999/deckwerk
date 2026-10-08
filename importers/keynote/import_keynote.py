@@ -558,6 +558,30 @@ def flip_svg_path(
     return " ".join(out)
 
 
+def _outset_for_stroke(box: dict[str, float], style: "ShapeStyle") -> dict[str, float]:
+    """The box of a native rectangle whose outline lands where Keynote's does.
+
+    Keynote centres a shape's stroke on its geometry, so half of it lies
+    outside the stored box. The editor draws a native rectangle's stroke
+    wholly inside the element box (shapeSvg insets it by half the width), so
+    taking Keynote's box as is shrinks every outline by one stroke width: a
+    5px frame drawn tight around a picture let the picture's edge show past
+    it. Growing the box by half the stroke on each side, about the same
+    centre so rotation is unaffected, puts the stroke back on the geometry.
+    Paths need none of this: their stroke is centred on the path already.
+    """
+    if style.stroke is None or style.stroke_width <= 0:
+        return box
+    half = style.stroke_width / 2
+    return {
+        **box,
+        "x": box["x"] - half,
+        "y": box["y"] - half,
+        "w": box["w"] + style.stroke_width,
+        "h": box["h"] + style.stroke_width,
+    }
+
+
 def is_axis_aligned_rectangle(path_msg: Any) -> bool:
     """Whether a closed Keynote path is exactly an axis-aligned rectangle.
 
@@ -2674,7 +2698,7 @@ class Importer:
         ):
             source = pathsource.scalar_path_source
             if int(source.type) == 0:
-                element = self._base(box, z, "shape")
+                element = self._base(_outset_for_stroke(box, style), z, "shape")
                 element.update(
                     {
                         "shape": "rect",
@@ -2781,7 +2805,7 @@ class Importer:
             and not style.arrow_end
             and is_axis_aligned_rectangle(path_msg)
         ):
-            element = self._base(box, z, "shape")
+            element = self._base(_outset_for_stroke(box, style), z, "shape")
             element.update(
                 {
                     "shape": "rect",

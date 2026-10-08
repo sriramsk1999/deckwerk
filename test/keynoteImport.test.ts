@@ -686,6 +686,7 @@ describe('keynote importer', () => {
         timeline: Array<{ id: string; trigger: { on: string }; action: { type: string; target: string } }>;
       }>;
       titleSlideElement: { html: string; style: Record<string, string> };
+      outlinedFrame: { shape: string; x: number; y: number; w: number; h: number; stroke: string; strokeWidth: number; fill: null };
       lineSpacingBody: { html: string; style: Record<string, string> };
       rolloutList: { html: string; paragraphSpacing: number | null };
       rotatedMiddle: Record<'x' | 'y' | 'w' | 'h' | 'cx' | 'cy', number>;
@@ -745,6 +746,17 @@ describe('keynote importer', () => {
       // second paragraph's margin, and nothing goes above the first.
       expect(lineSpacingBody.style).toMatchObject({ 'line-height': '1.08', 'letter-spacing': 'normal' });
       expect(lineSpacingBody.html).toBe('<p>Existing datasets fall short</p><p style="margin-top: 0.5em">We generate our own</p>');
+    });
+
+    it('keeps an outline centred on Keynote\'s geometry, as Keynote strokes it', () => {
+      const { outlinedFrame } = load();
+      // Keynote's 5pt stroke straddles the 200x200 box; the editor strokes a
+      // rectangle inside its box, so the box grows by half the stroke each
+      // way. Taken as is, the frame came out 5px too small and the picture
+      // it surrounds showed past its edge.
+      expect(outlinedFrame).toEqual({
+        shape: 'rect', x: 94.5, y: 764.5, w: 205, h: 205, stroke: '#ee220c', strokeWidth: 5, fill: null,
+      });
     });
 
     it('turns a Move build into a Morph to a copy of the slide', () => {

@@ -254,6 +254,45 @@ def partial_underline():
     return k.styled_text_to_html(objects, objects[40], k.resolve_text_style(objects, objects[40]))
 
 
+def outlined_frame():
+    """Slide 13: a 5pt red frame drawn as a plain four-corner bezier path,
+    sized exactly to the 200x200 reconstruction it highlights."""
+    corners = " ".join(
+        f"elements {{ type: {kind} points {{ x: {x} y: {y} }} }}"
+        for kind, x, y in (("moveTo", 0, 0), ("lineTo", 200, 0),
+                           ("lineTo", 200, 200), ("lineTo", 0, 200)))
+    objects = {
+        50: message(TSWP.ShapeStyleArchive, """
+            super { shape_properties {
+                fill { }
+                stroke {
+                    color { model: rgb r: 0.932 g: 0.135 b: 0.047 a: 1 }
+                    width: 5 cap: ButtCap join: MiterJoin miter_limit: 4
+                    pattern { type: TSDSolidPattern phase: 0 count: 0 }
+                }
+            } }
+        """),
+        60: message(TSWP.ShapeInfoArchive, f"""
+            super {{
+                super {{ geometry {{
+                    position {{ x: 97 y: 767 }} size {{ width: 200 height: 200 }} angle: 0.0
+                }} }}
+                style {{ identifier: 50 }}
+                pathsource {{ bezier_path_source {{
+                    naturalSize {{ width: 200 height: 200 }}
+                    path {{ {corners} elements {{ type: closeSubpath }} }}
+                }} }}
+            }}
+            is_text_box: false
+        """),
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        importer = k.Importer(objects, {}, None, Path(tmp), k.Report(), canvas=(1920, 1080))
+        [element] = importer._convert_shape(
+            objects[60], importer._box(k.find_geometry(objects[60]), (0, 0)), 0)
+    return {key: element[key] for key in ("shape", "x", "y", "w", "h", "stroke", "strokeWidth", "fill")}
+
+
 def move_build():
     """Slide 11: "Latents 16x16" and its column move left on a click (two
     Keynote Move builds, the second automatic) to make room for 8x8."""
@@ -287,6 +326,7 @@ def move_build():
 
 print(json.dumps({
     "moveBuild": move_build(),
+    "outlinedFrame": outlined_frame(),
     "titleSlide": title_slide(),
     "titleSlideElement": title_slide_element(),
     "lineSpacingBody": line_spacing_body(),
