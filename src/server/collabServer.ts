@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { lookup } from 'node:dns/promises';
 import { createReadStream, createWriteStream, existsSync, statSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
-import { mkdir, mkdtemp, readdir, readFile, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { basename, dirname, extname, join, normalize, resolve } from 'node:path';
@@ -18,6 +18,7 @@ import {
 import { exportDeck, webExportUnavailableReason } from '../main/exportDeck.js';
 import { capabilities } from '../shared/capabilities.js';
 import { getFfmpegPath, getFfprobePath, probeMedia } from '../main/ffmpeg.js';
+import { DeckWire } from './deckWire.js';
 import {
   RenditionStore,
   isVideoAsset,
@@ -321,6 +322,13 @@ export interface CollabServerOptions {
    * than CPU. An object configures the store (a test's own cache directory).
    */
   mediaRenditions?: boolean | RenditionOptions;
+  /**
+   * Keep every Keynote and PowerPoint upload, successful or not, for this
+   * many days under `<rootDir>/.uploads/`, so a bad import can be debugged
+   * against the file that produced it. Off (0) unless set: the hosted server
+   * turns it on, a desktop app sharing one deck has no imports to keep.
+   */
+  keepUploadsDays?: number;
 }
 
 export interface RunningCollabServer {
@@ -533,6 +541,28 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
     return people.size;
   }
 
+  /**
+   * A deck's title and slide count for the listing. Every listing used to
+   * parse every deck.json in full, and one 20 MB deck made each visit to the
+   * deck picker hold the event loop ~20 ms for everyone editing. An open deck
+   * answers from memory; any other is parsed once per change of its file.
+   */
+  const summaries = new Map<string, { size: number; mtimeMs: number; title?: string; slides: number }>();
+  async function deckSummary(
+    id: string,
+    dir: string,
+    saved: { size: number; mtimeMs: number } | null,
+  ): Promise<{ title?: string; slides: number }> {
+    const open = rooms.get(id);
+    if (open) return { title: open.session.deck.title, slides: open.session.deck.slides.length };
+    const known = summaries.get(dir);
+    if (known && saved && known.size === saved.size && known.mtimeMs === saved.mtimeMs) return known;
+    const raw = JSON.parse(await readFile(join(dir, 'deck.json'), 'utf8')) as { title?: string; slides?: unknown[] };
+    const summary = { title: raw.title, slides: Array.isArray(raw.slides) ? raw.slides.length : 0 };
+    if (saved) summaries.set(dir, { ...summary, size: saved.size, mtimeMs: saved.mtimeMs });
+    return summary;
+  }
+
   async function deckListEntry(
     id: string,
     dir: string,
@@ -540,10 +570,8 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
   ): Promise<DeckListEntry | null> {
     let listed: DeckListEntry;
     try {
-      const raw = JSON.parse(await readFile(join(dir, 'deck.json'), 'utf8')) as {
-        title?: string; slides?: unknown[];
-      };
       const saved = await stat(join(dir, 'deck.json')).catch(() => null);
+      const raw = await deckSummary(id, dir, saved);
       // deck.json is replaced on every save, so its own birth time is the last
       // save; the folder's is when the deck was made. Without birth times,
       // the earliest time we have is the best guess.
@@ -555,7 +583,7 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
       listed = {
         id,
         title: raw.title ?? name,
-        slides: Array.isArray(raw.slides) ? raw.slides.length : 0,
+        slides: raw.slides,
         editedAt: saved ? saved.mtime.toISOString() : null,
         createdAt: Number.isFinite(createdMs) ? new Date(createdMs).toISOString() : null,
         editors: editorsIn(rooms.get(id)),
@@ -798,6 +826,50 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
    * the rules that applied before it was trashed. `.trash` is a dot-name, so
    * splitDeckPath refuses it: no listing walks into it and no route opens it.
    */
+  /**
+   * Uploaded Keynote and PowerPoint files, kept for options.keepUploadsDays.
+   * One folder per upload: the file under the name it was imported as, and
+   * upload.json saying which deck it became, who sent it and whether the
+   * import worked. A dot-name like .trash, so no listing or route reaches it.
+   */
+  const UPLOADS_DIR = join(rootDir, '.uploads');
+  const keepUploadsDays = Math.max(0, options.keepUploadsDays ?? 0);
+
+  async function keepUpload(file: string, meta: Record<string, unknown>): Promise<void> {
+    if (keepUploadsDays <= 0) return;
+    try {
+      const at = new Date();
+      const slug = String(meta.deck).replace(/[^0-9A-Za-z._-]+/g, '-').slice(0, 80);
+      const entry = join(UPLOADS_DIR, `${at.toISOString().replace(/[:.]/g, '-')}-${slug}`);
+      await mkdir(entry, { recursive: true });
+      await copyFile(file, join(entry, basename(file)));
+      await writeFile(join(entry, 'upload.json'), `${JSON.stringify({ ...meta, at: at.toISOString() }, null, 2)}\n`);
+    } catch (error) {
+      process.stderr.write(`could not keep upload ${basename(file)}: ${String(error)}\n`);
+    }
+    await pruneUploads();
+  }
+
+  async function pruneUploads(): Promise<void> {
+    if (keepUploadsDays <= 0) return;
+    const cutoff = Date.now() - keepUploadsDays * 24 * 60 * 60 * 1000;
+    let entries: string[];
+    try {
+      entries = await readdir(UPLOADS_DIR);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const path = join(UPLOADS_DIR, entry);
+      try {
+        if ((await stat(path)).mtimeMs < cutoff) await rm(path, { recursive: true, force: true });
+      } catch {
+        // Gone already, or unreadable: the next prune tries again.
+      }
+    }
+  }
+  void pruneUploads();
+
   const TRASH_DIR = join(rootDir, '.trash');
   const TRASH_ENTRY_ID = /^[0-9A-Za-z-]{8,80}$/;
 
@@ -932,22 +1004,28 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
     return room;
   }
 
+  /** Messages carrying a whole deck are spliced from a cache (deckWire.ts). */
+  const wire = new DeckWire();
   const send = (peer: Peer, message: ServerMessage) => {
-    if (peer.socket.readyState === peer.socket.OPEN) peer.socket.send(JSON.stringify(message));
+    if (peer.socket.readyState === peer.socket.OPEN) peer.socket.send(wire.encode(message), { binary: false });
   };
   /**
-   * One message to every greeted peer. Serialised once, however many peers
-   * there are: a whole-deck message for a large deck is megabytes of JSON,
-   * and stringifying it per peer held the event loop for each of them.
-   * (permessage-deflate still compresses per socket — each connection has
-   * its own compression context, which ws offers no way to share.)
+   * One message to every greeted peer. Serialised and encoded once, however
+   * many peers there are: a whole-deck message for a large deck is megabytes
+   * of JSON, and stringifying it (or encoding the string) per peer held the
+   * event loop for each of them. (permessage-deflate still compresses per
+   * socket — each connection has its own compression context, which ws
+   * offers no way to share — but that runs on zlib's thread pool.)
    */
   const broadcast = (room: Room, message: ServerMessage, except?: string) => {
-    let data: string | null = null;
+    let data: Buffer | null = null;
     for (const [id, peer] of room.peers) {
       if (id === except || !peer.greeted || peer.socket.readyState !== peer.socket.OPEN) continue;
-      data ??= JSON.stringify(message);
-      peer.socket.send(data);
+      if (!data) {
+        const encoded = wire.encode(message);
+        data = typeof encoded === 'string' ? Buffer.from(encoded, 'utf8') : encoded;
+      }
+      peer.socket.send(data, { binary: false });
     }
   };
   /** An agent behind an HTTP route, for the edit log: a linked bridge, or the server's agent. */
@@ -2028,18 +2106,21 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
       if (existsSync(dir)) return respondJson(response, 409, { error: `deck "${id}" already exists` });
       const body = await readBody(request);
       const tmp = await mkdtemp(join(tmpdir(), 'collab-import-'));
+      const sourceFile = join(tmp, `${name}${importRoute.extension}`);
+      const upload = { deck: id, file: basename(sourceFile), bytes: body.length, by: identity?.login ?? null };
       try {
-        const sourceFile = join(tmp, `${name}${importRoute.extension}`);
         await writeFile(sourceFile, body);
         const report = await importRoute.run(sourceFile, dir);
         await writeImportedDeckAccess(dir);
+        await keepUpload(sourceFile, { ...upload, ok: true });
         respondJson(response, 200, { id, report });
       } catch (error) {
         await rm(dir, { recursive: true, force: true });
         const message = String(error instanceof Error ? error.message : error);
-        // The person only sees this in their browser and the upload is gone
-        // afterwards; keep it in the journal so a failed import can be debugged.
+        // The person only sees this in their browser; keep it in the journal
+        // (and the file in .uploads/, when kept) so the failure can be debugged.
         process.stderr.write(`import of "${id}"${importRoute.extension} (${body.length} bytes) failed: ${message}\n`);
+        await keepUpload(sourceFile, { ...upload, ok: false, error: message });
         respondJson(response, 400, { error: message });
       } finally {
         await rm(tmp, { recursive: true, force: true });
