@@ -70,7 +70,8 @@ import { authoringPageHtml, type TextOverflow } from '../shared/htmlMeasure.js';
 import { deckRevision } from '../main/agentRuntime.js';
 import { applyAgentTransaction, validateDeckIntegrity, type AgentOperation } from '../shared/agent.js';
 import { NativeEditRequestSchema, applyNativeEdits, nativeEditContract } from '../shared/nativeEdits.js';
-import { type Deck, type Slide, type SlideElement } from '../shared/deck.js';
+import { type Comment, type Deck, type Slide, type SlideElement } from '../shared/deck.js';
+import { commentsAt, commentsOperation, findComment, threadEdits, threadIdOf } from '../shared/comments.js';
 import { classifyMediaName } from '../shared/media.js';
 import { deckOutline } from '../shared/deckDigest.js';
 import type { AgentPanelState } from '../shared/ipc.js';
@@ -3136,25 +3137,37 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
       };
       if (!body.text?.trim()) return respondJson(response, 400, { error: 'missing text' });
       const room = await getRoom(deckParam);
-      const slide = body.slideId
-        ? room.session.deck.slides.find((candidate) => candidate.id === body.slideId)
-        : room.session.deck.slides.find((candidate) => candidate.elements.some((element) => element.id === body.elementId));
+      // A reply needs only the comment it answers: that says where it goes.
+      const thread = body.parentId && !body.slideId && !body.elementId
+        ? findComment(room.session.deck, body.parentId)
+        : null;
+      if (body.parentId && !body.slideId && !body.elementId && !thread) {
+        return respondJson(response, 404, { error: 'no such comment to reply to' });
+      }
+      const slideId = thread?.target.slideId ?? body.slideId;
+      const elementId = thread ? thread.target.elementId : body.elementId;
+      const slide = slideId
+        ? room.session.deck.slides.find((candidate) => candidate.id === slideId)
+        : room.session.deck.slides.find((candidate) => candidate.elements.some((element) => element.id === elementId));
       if (!slide) return respondJson(response, 404, { error: 'no such slide or element' });
-      const owner = body.elementId ? slide.elements.find((element) => element.id === body.elementId) : slide;
+      const owner = elementId ? slide.elements.find((element) => element.id === elementId) : slide;
       if (!owner) return respondJson(response, 404, { error: 'no such element' });
-      const comment = {
+      const comment: Comment = {
         id: `comment-${randomUUID()}`,
         author: body.author?.trim() || 'Agent',
+        ...(identity?.login ? { login: `${identity.login}:agent` } : {}),
         text: body.text.trim(),
         ts: new Date().toISOString(),
         resolved: false,
-        ...(body.parentId ? { parentId: body.parentId } : {}),
       };
-      const next = structuredClone(owner);
-      (next.comments ??= []).push(comment);
-      const operation: AgentOperation = 'elements' in owner
-        ? { op: 'replaceSlide', slideId: slide.id, slide: next as typeof slide }
-        : { op: 'replaceElement', slideId: slide.id, elementId: owner.id, element: next as typeof owner };
+      const target = { slideId: slide.id, ...(elementId ? { elementId } : {}) };
+      const parentId = body.parentId;
+      if (parentId && !threadIdOf(commentsAt(room.session.deck, target), parentId)) {
+        return respondJson(response, 404, { error: 'no such comment to reply to on that slide or element' });
+      }
+      const operation = commentsOperation(room.session.deck, target, (comments) => (parentId
+        ? threadEdits.reply(comments, parentId, comment)
+        : threadEdits.start(comments, comment)))!;
       const commentLabel = `The Agent added a comment${body.slideId ? ` to slide ${body.slideId}` : ''}: ${body.text.trim().slice(0, 160)}`;
       const applied = room.session.applyOps([operation], {
         label: commentLabel,
@@ -3178,24 +3191,11 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
       const body = JSON.parse((await readBody(request)).toString('utf8')) as { commentId?: string; resolved?: boolean };
       if (!body.commentId) return respondJson(response, 400, { error: 'missing commentId' });
       const room = await getRoom(deckParam);
-      let operation: AgentOperation | null = null;
-      for (const slide of room.session.deck.slides) {
-        const slideComment = slide.comments?.find((comment) => comment.id === body.commentId);
-        if (slideComment) {
-          const next = structuredClone(slide);
-          next.comments!.find((comment) => comment.id === body.commentId)!.resolved = body.resolved ?? true;
-          operation = { op: 'replaceSlide', slideId: slide.id, slide: next };
-          break;
-        }
-        for (const element of slide.elements) {
-          if (!element.comments?.some((comment) => comment.id === body.commentId)) continue;
-          const next = structuredClone(element);
-          next.comments!.find((comment) => comment.id === body.commentId)!.resolved = body.resolved ?? true;
-          operation = { op: 'replaceElement', slideId: slide.id, elementId: element.id, element: next };
-          break;
-        }
-        if (operation) break;
-      }
+      const commentId = body.commentId;
+      const found = findComment(room.session.deck, commentId);
+      const operation = found && commentsOperation(room.session.deck, found.target, (comments) =>
+        threadEdits.resolve(comments, commentId, body.resolved ?? true, identity ? `${identity.name} · agent` : 'Agent'));
+      if (found && !operation) return respondJson(response, 200, { ok: true, resolved: body.resolved ?? true });
       if (!operation) return respondJson(response, 404, { error: 'no such comment' });
       const resolveLabel = `The Agent marked comment ${body.commentId} ${body.resolved ?? true ? 'resolved' : 'unresolved'}.`;
       const applied = room.session.applyOps([operation], {

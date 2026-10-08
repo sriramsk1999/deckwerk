@@ -17,6 +17,7 @@ import { slidesToHtml } from '@shared/htmlSlides.js';
 import { capabilities } from '@shared/capabilities.js';
 import { PLAYER_TYPE_CSS } from '@shared/playerTypeCss.js';
 import { CustomThemeSchema, parseDeck, type Comment, type Deck, type Slide, type SlideElement } from '@shared/deck.js';
+import { commentsOperation, findComment, threadEdits } from '@shared/comments.js';
 import { diffDecks } from '@shared/deckDiff.js';
 import { renameRetiredFields } from '@shared/fieldAliases.js';
 import {
@@ -179,10 +180,12 @@ Everything else:
   comments  [deck] [--unresolved]         every comment, with its slide number.
                                           Humans leave instructions this way —
                                           check it at the start of a task.
-  comments  [deck] --resolve <commentId>  mark a comment resolved (do this
+  comments  [deck] --resolve <commentId>  mark a thread resolved (do this
                                           after acting on it; never delete)
+  comments  [deck] --add <text> --reply <commentId> [--author <name>]
+                                          answer in a thread (reopens it)
   comments  [deck] --add <text> (--slide <id|number> | --element <elementId>)
-                                          [--author <name>]  reply on a thread
+                                          [--author <name>]  start a new thread
   chat      [deck] [--since <messageId>]  the deck's chat, oldest first. Lives on
                                           the collab server, not in the folder:
                                           run it in a connected mirror, or pass
@@ -1213,7 +1216,7 @@ function titleFromHtml(html: string): string | null {
  */
 async function commentsCommand(argv: string[], io: CliIo): Promise<number> {
   const { flags, options, positional } = parseFlags(argv, [
-    'resolve', 'add', 'slide', 'element', 'author',
+    'resolve', 'add', 'slide', 'element', 'author', 'reply',
   ]);
   ensureKnownFlags('comments', flags, ['unresolved']);
   ensurePositionals('comments', positional, 1);
@@ -1223,12 +1226,19 @@ async function commentsCommand(argv: string[], io: CliIo): Promise<number> {
   const addText = options.get('add');
   const slideRef = options.get('slide');
   const elementId = options.get('element');
+  const replyId = options.get('reply');
 
   if (resolveId) {
-    const operation = resolveCommentOperation(deck, resolveId);
-    if (!operation) {
+    const found = findComment(deck, resolveId);
+    if (!found) {
       io.err(`No comment with id ${resolveId}`);
       return EXIT_ERROR;
+    }
+    const operation = commentsOperation(deck, found.target, (comments) =>
+      threadEdits.resolve(comments, resolveId, true, options.get('author') ?? 'agent'));
+    if (!operation) {
+      io.out(json({ resolved: resolveId, alreadyResolved: true }));
+      return EXIT_OK;
     }
     return applyTransaction(deckDir, {
       version: AGENT_PROTOCOL_VERSION,
@@ -1238,10 +1248,6 @@ async function commentsCommand(argv: string[], io: CliIo): Promise<number> {
   }
 
   if (addText) {
-    if (Boolean(slideRef) === Boolean(elementId)) {
-      io.err('comments --add needs exactly one of --slide <slideId> or --element <elementId>');
-      return EXIT_USAGE;
-    }
     const comment: Comment = {
       id: `comment-${randomUUID().slice(0, 8)}`,
       author: options.get('author') ?? 'agent',
@@ -1249,18 +1255,36 @@ async function commentsCommand(argv: string[], io: CliIo): Promise<number> {
       ts: new Date().toISOString(),
       resolved: false,
     };
-    // A number here is the slide number the listing above prints, so a reply
-    // can name the slide the same way the comment it answers did.
-    const slideId = slideRef ? slideIdForRef(deck, slideRef) ?? slideRef : undefined;
-    const operation = addCommentOperation(deck, comment, slideId, elementId);
-    if (!operation) {
-      io.err(`No such ${slideRef ? `slide: ${slideRef}` : `element: ${elementId}`}`);
-      return EXIT_ERROR;
+    let operation: DraftOperation | null;
+    if (replyId) {
+      const found = findComment(deck, replyId);
+      if (!found) {
+        io.err(`No comment with id ${replyId}`);
+        return EXIT_ERROR;
+      }
+      operation = commentsOperation(deck, found.target, (comments) => threadEdits.reply(comments, replyId, comment));
+    } else {
+      if (Boolean(slideRef) === Boolean(elementId)) {
+        io.err('comments --add needs --reply <commentId>, or exactly one of --slide <slideId> or --element <elementId>');
+        return EXIT_USAGE;
+      }
+      // A number here is the slide number the listing above prints, so a
+      // comment can name the slide the same way a person does.
+      const slideId = slideRef ? slideIdForRef(deck, slideRef) ?? slideRef : undefined;
+      const slide = deck.slides.find((candidate) => (slideId
+        ? candidate.id === slideId
+        : candidate.elements.some((element) => element.id === elementId)));
+      if (!slide) {
+        io.err(`No such ${slideRef ? `slide: ${slideRef}` : `element: ${elementId}`}`);
+        return EXIT_ERROR;
+      }
+      operation = commentsOperation(deck, { slideId: slide.id, ...(elementId ? { elementId } : {}) },
+        (comments) => threadEdits.start(comments, comment));
     }
     return applyTransaction(deckDir, {
       version: AGENT_PROTOCOL_VERSION,
-      label: 'Add comment',
-      operations: [operation],
+      label: replyId ? 'Reply to comment' : 'Add comment',
+      operations: [operation!],
     }, io, { commentId: comment.id });
   }
 
@@ -1343,49 +1367,6 @@ function listComments(deck: Deck): CommentRow[] {
 }
 
 type DraftOperation = DraftTransaction['operations'][number];
-
-function resolveCommentOperation(deck: Deck, commentId: string): DraftOperation | null {
-  for (const slide of deck.slides) {
-    const onSlide = slide.comments?.find((c) => c.id === commentId);
-    if (onSlide) {
-      const { elements: _elements, ...props } = structuredClone(slide);
-      for (const c of props.comments ?? []) if (c.id === commentId) c.resolved = true;
-      return { op: 'setSlideProperties', slideId: slide.id, slide: props };
-    }
-    for (const element of slide.elements) {
-      if (element.comments?.some((c) => c.id === commentId)) {
-        const next = structuredClone(element);
-        for (const c of next.comments ?? []) if (c.id === commentId) c.resolved = true;
-        return { op: 'replaceElement', slideId: slide.id, elementId: element.id, element: next };
-      }
-    }
-  }
-  return null;
-}
-
-function addCommentOperation(
-  deck: Deck,
-  comment: Comment,
-  slideId?: string,
-  elementId?: string,
-): DraftOperation | null {
-  for (const slide of deck.slides) {
-    if (slideId && slide.id === slideId) {
-      const { elements: _elements, ...props } = structuredClone(slide);
-      (props.comments ??= []).push(comment);
-      return { op: 'setSlideProperties', slideId: slide.id, slide: props };
-    }
-    if (elementId) {
-      const element = slide.elements.find((e) => e.id === elementId);
-      if (element) {
-        const next = structuredClone(element);
-        (next.comments ??= []).push(comment);
-        return { op: 'replaceElement', slideId: slide.id, elementId, element: next };
-      }
-    }
-  }
-  return null;
-}
 
 async function transactionCommand(argv: string[], io: CliIo): Promise<number> {
   const [sub, ...rest] = argv;

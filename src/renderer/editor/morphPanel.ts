@@ -6,7 +6,7 @@ import { recoverPreviewFrames } from '../player/previewFrameRecovery.js';
 import { freezePreviewVideos } from '../player/previewPoster.js';
 import { renderSlide } from '../player/render.js';
 import { describeElement as describe, renderElementLabel } from './elementLabel.js';
-import { sameSlideIgnoringNotes, type EditorStore } from './store.js';
+import { sameSlideDrawing, type EditorStore } from './store.js';
 
 const PREVIEW_WIDTH_FALLBACK = 560;
 
@@ -497,7 +497,7 @@ export class MorphPanel {
       cached
       && cached.canvasW === canvas.w
       && cached.canvasH === canvas.h
-      && sameSlideIgnoringNotes(cached.slide, slide)
+      && sameSlideDrawing(cached.slide, slide)
     ) {
       // A note edited since the surface was drawn changes nothing in the
       // picture; remember the current slide so the next comparison is cheap.

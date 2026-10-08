@@ -602,8 +602,9 @@ The deck argument defaults to the current directory.
 
 People leave you work in two places. **Comments** sit on a slide or an
 object, live inside `deck.json`, and are review state: `slide-agent comments
---unresolved` at the start of a task, act on each, then `--resolve <id>`
-(never delete). **Chat** is the running conversation about a hosted deck —
+--unresolved` at the start of a task, act on each, answer in its thread with
+`--add <text> --reply <id>` when there is something to say, then
+`--resolve <id>` (never delete). **Chat** is the running conversation about a hosted deck —
 "@agent can you tighten slide 4?" — and is deliberately *not* part of the
 document: the collab server keeps it per deck in `chat.jsonl` beside
 `deck.json` (append-only, one JSON message per line), and it never enters a
@@ -611,6 +612,24 @@ transaction, undo or History. So chat needs the server: run the commands in
 the folder `slide-agent connect` mirrored (they read its
 `.deckwerk-mirror.json`), or name it with `--server <origin> --deck-id <id>`.
 In a mirror, `./deck chat` / `./deck say` are the same commands.
+
+A comment is a thread, as in TeXWerk: a root comment (no `parentId`) and the
+replies whose `parentId` names it; the root's `resolved` is the thread's, and
+a reply reopens a resolved thread. In the editor threads open only from the
+right-click menus (an object's, the slide background's, a rail row's); what
+stays on screen is an amber highlight on whatever carries an open thread, on
+the canvas and on the slide's rail row, and never in a presentation. A
+hosted thread's **Link** is `?deck=<id>&comment=<id>`, which opens the deck
+on that slide with the thread showing.
+
+Comments are review state, not content, and three rules keep them that way
+(`src/shared/comments.ts`): they change only through the `updateComments`
+operation, which carries the list it was made from and merges by comment id,
+so concurrent replies all land; `replaceElement`, `replaceSlide` and
+`setSlideProperties` keep the target's comments whatever they carry, so a
+drag or a retype can never carry a stale thread over a newer one, and
+`diffDecks` never puts comments in them; and undo, redo and History leave
+comments where they are.
 
 ```bash
 slide-agent chat                          # everything, oldest first; prints "last"
