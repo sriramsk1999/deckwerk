@@ -680,6 +680,14 @@ describe('keynote importer', () => {
   describe('text structures from a real talk', () => {
     let cases: {
       titleSlide: string;
+      moveBuild: Array<{
+        id: string; morphFromPrevious?: boolean; morphDuration?: number; notes: string;
+        elements: Array<{ id: string; x: number; morphId: string }>;
+        timeline: Array<{ id: string; trigger: { on: string }; action: { type: string; target: string } }>;
+      }>;
+      titleSlideElement: { html: string; style: Record<string, string> };
+      outlinedFrame: { shape: string; x: number; y: number; w: number; h: number; stroke: string; strokeWidth: number; fill: null };
+      lineSpacingBody: { html: string; style: Record<string, string> };
       rolloutList: { html: string; paragraphSpacing: number | null };
       rotatedMiddle: Record<'x' | 'y' | 'w' | 'h' | 'cx' | 'cy', number>;
       rotatedTop: Record<'x' | 'y' | 'w' | 'h' | 'cx' | 'cy', number>;
@@ -719,6 +727,62 @@ describe('keynote importer', () => {
       // Affiliation marks are the editor's own superscript.
       expect(titleSlide).toContain('Alice*<span style="vertical-align: super; font-size: 0.7em">1</span>');
       expect(titleSlide).toContain('<span style="vertical-align: super; font-size: 0.7em">1</span>MIT');
+    });
+
+    it('keeps Keynote\'s spacing: tracking, line spacing and space between paragraphs', () => {
+      const { titleSlideElement, lineSpacingBody } = load();
+      // Stated on the element, so the theme's role-title defaults (tighter
+      // tracking, 1.08 leading) cannot squeeze a title Keynote laid out:
+      // that turned slide 1's author block into condensed, cramped lines.
+      expect(titleSlideElement.style).toMatchObject({ 'line-height': '1.2', 'letter-spacing': '-0.02em' });
+      const blocks = titleSlideElement.html.match(/<p[^>]*>.*?<\/p>/g)!;
+      // The author lines track normally; only the title is tightened.
+      expect(blocks.find((block) => block.includes('Alice'))).toContain('letter-spacing: normal');
+      // The affiliations' 24pt space after sets the footnote apart, as a
+      // margin in em of the 40pt line so auto-fit scales it too.
+      expect(blocks.find((block) => block.includes('Equal contribution'))).toContain('margin-top: 0.6em');
+      expect(blocks.filter((block) => block.includes('margin'))).toHaveLength(1);
+      // 0.9 lines of a 1.2 natural line height; a space before becomes the
+      // second paragraph's margin, and nothing goes above the first.
+      expect(lineSpacingBody.style).toMatchObject({ 'line-height': '1.08', 'letter-spacing': 'normal' });
+      expect(lineSpacingBody.html).toBe('<p>Existing datasets fall short</p><p style="margin-top: 0.5em">We generate our own</p>');
+    });
+
+    it('keeps an outline centred on Keynote\'s geometry, as Keynote strokes it', () => {
+      const { outlinedFrame } = load();
+      // Keynote's 5pt stroke straddles the 200x200 box; the editor strokes a
+      // rectangle inside its box, so the box grows by half the stroke each
+      // way. Taken as is, the frame came out 5px too small and the picture
+      // it surrounds showed past its edge.
+      expect(outlinedFrame).toEqual({
+        shape: 'rect', x: 94.5, y: 764.5, w: 205, h: 205, stroke: '#ee220c', strokeWidth: 5, fill: null,
+      });
+    });
+
+    it('turns a Move build into a Morph to a copy of the slide', () => {
+      const { moveBuild } = load();
+      // Builds only show and hide; Morph is what moves. Dropped, the Move
+      // left "Latents 16x16" in place and 8x8 built in on top of it.
+      expect(moveBuild.map((slide) => slide.id)).toEqual(['slide-11', 'slide-11-m2']);
+      const [before, after] = moveBuild;
+      // Up to the Move: only what has appeared by then, with its builds.
+      expect(before.elements.map((e) => e.id)).toEqual(['title', 'gt', 'label16', 'recon16']);
+      expect(before.timeline.map((e) => e.id)).toEqual(['b1', 'b2', 'b3']);
+      expect(before.morphFromPrevious).toBeUndefined();
+      // The copy: everything on screen at the Move, moved by both Move builds
+      // (the automatic one rides the same transition), paired by morphId.
+      expect(after).toMatchObject({ morphFromPrevious: true, morphDuration: 1000, notes: 'n' });
+      const at = Object.fromEntries(after.elements.map((e) => [e.morphId, e]));
+      expect(at.label16.x).toBe(101);
+      expect(at.recon16.x).toBe(97);
+      expect(at.gt.x).toBe(440);
+      expect(after.elements.every((e) => e.id === `${e.morphId}-m2`)).toBe(true);
+      expect(before.elements.every((e) => e.morphId === e.id)).toBe(true);
+      // What builds after the Move builds on the copy, still hidden until then.
+      expect(after.timeline).toEqual([
+        expect.objectContaining({ id: 'b4-m2', trigger: expect.objectContaining({ on: 'click' }),
+          action: expect.objectContaining({ type: 'appear', target: 'label8-m2' }) }),
+      ]);
     });
 
     it('writes run styles the browser can read, quotes and all', () => {

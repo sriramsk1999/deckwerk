@@ -31,7 +31,7 @@ import {
  * add, remove and restyle objects, toggle builds, reorder, delete and add
  * sections; re-save a page untouched; apply the same page twice; save
  * without applying and let the watcher sync it. The person's moves are what
- * people do in a session: notes, comments, skipping a slide, rewriting a
+ * people do in a session: notes, comments and replies to them, skipping a slide, rewriting a
  * phrase, adding and deleting slides — on a hosted deck over the WebSocket,
  * sometimes while the agent's page is compiling; beside a local deck through
  * the same CLI transactions any second writer would use. In a hosted mirror
@@ -416,9 +416,20 @@ class Walk {
   async human(concurrently = false): Promise<void> {
     const id = this.pick(this.order);
     const model = this.slides.get(id)!;
-    const op = this.pick(['notes', 'skip', 'comment', 'retext', 'add', 'delete']);
+    const op = this.pick(['notes', 'skip', 'comment', 'reply', 'retext', 'add', 'delete']);
     const hosted = this.ws.kind === 'hosted' ? (this.ws as HostedWorkspace).human : null;
-    if (op === 'comment') {
+    if (op === 'reply' && model.comments > 0) {
+      // Answering in a thread: the reply joins the thread on that slide and
+      // nothing an agent's page does to the slide may lose it.
+      const root = (await this.ws.deck()).slides.find((slide) => slide.id === id)?.comments?.[0]?.id;
+      this.expect(Boolean(root), `slide ${id} has no comment to reply to`);
+      this.log(`a person replies to a comment on ${id}`);
+      const result = await this.ws.run('comments', '--add', `Re: ${id}`, '--reply', root!);
+      this.expect(result.code === 0, `reply failed: ${result.stderr}`);
+      model.comments += 1;
+      return;
+    }
+    if (op === 'comment' || op === 'reply') {
       this.log(`a person comments on ${id}`);
       const result = await this.ws.run('comments', '--add', `Look at ${id}`, '--slide', id);
       this.expect(result.code === 0, `comment failed: ${result.stderr}`);

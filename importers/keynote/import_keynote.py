@@ -24,6 +24,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import copy
 import functools
 import hashlib
 import html
@@ -557,6 +558,30 @@ def flip_svg_path(
     return " ".join(out)
 
 
+def _outset_for_stroke(box: dict[str, float], style: "ShapeStyle") -> dict[str, float]:
+    """The box of a native rectangle whose outline lands where Keynote's does.
+
+    Keynote centres a shape's stroke on its geometry, so half of it lies
+    outside the stored box. The editor draws a native rectangle's stroke
+    wholly inside the element box (shapeSvg insets it by half the width), so
+    taking Keynote's box as is shrinks every outline by one stroke width: a
+    5px frame drawn tight around a picture let the picture's edge show past
+    it. Growing the box by half the stroke on each side, about the same
+    centre so rotation is unaffected, puts the stroke back on the geometry.
+    Paths need none of this: their stroke is centred on the path already.
+    """
+    if style.stroke is None or style.stroke_width <= 0:
+        return box
+    half = style.stroke_width / 2
+    return {
+        **box,
+        "x": box["x"] - half,
+        "y": box["y"] - half,
+        "w": box["w"] + style.stroke_width,
+        "h": box["h"] + style.stroke_width,
+    }
+
+
 def is_axis_aligned_rectangle(path_msg: Any) -> bool:
     """Whether a closed Keynote path is exactly an axis-aligned rectangle.
 
@@ -916,6 +941,47 @@ class TextStyle:
     color: str | None = None
     gradient: str | None = None
     horizontal_padding: float = 8.0
+    # Character spacing as a fraction of the size (Keynote's "tracking").
+    tracking: float | None = None
+    # The paragraph's line spacing as Keynote states it: (mode, amount).
+    line_spacing: tuple[str, float] | None = None
+    space_before: float | None = None
+    space_after: float | None = None
+
+
+# The line height Keynote gives Helvetica Neue and its other system faces at
+# "1.0 lines": the face's ascent plus descent, ~1.2 of the size.
+KEYNOTE_LINE_HEIGHT = 1.2
+
+
+def line_height_css(spacing: tuple[str, float] | None, font_size: float | None) -> str:
+    """A unitless CSS line-height for a Keynote line spacing at a size.
+
+    Unitless, so it scales with the font when auto-fit shrinks the box.
+    """
+    natural = KEYNOTE_LINE_HEIGHT
+    if spacing is not None:
+        mode, amount = spacing
+        size = font_size or DEFAULT_FONT_SIZE
+        if mode == "kRelativeLineSpacing" and amount > 0:
+            natural = KEYNOTE_LINE_HEIGHT * amount
+        elif mode == "kExactLineSpacing" and amount > 0:
+            natural = amount / size
+        elif mode == "kMinimumLineSpacing":
+            natural = max(natural, amount / size)
+        elif mode == "kMaximumLineSpacing" and amount > 0:
+            natural = min(natural, amount / size)
+        elif mode == "kSpaceBetweenLineSpacing":
+            natural += max(0.0, amount) / size
+    return f"{natural:.4g}"
+
+
+def tracking_css(tracking: float | None) -> str:
+    """Keynote tracking as CSS letter-spacing; `normal` when there is none, so
+    a theme's title letter-spacing never tightens imported text."""
+    if not tracking:
+        return "normal"
+    return f"{tracking:.4g}em"
 
 
 def resolve_text_style(objects: dict[int, Any], shape: Any) -> TextStyle:
@@ -1024,6 +1090,8 @@ def _read_char_properties(chars: Any, out: TextStyle) -> None:
         out.font_name = str(chars.font_name) or None
     if out.bold is None and chars.HasField("bold"):
         out.bold = bool(chars.bold)
+    if out.tracking is None and chars.HasField("tracking"):
+        out.tracking = float(chars.tracking)
     if out.color is None and chars.HasField("font_color"):
         out.color = color_to_hex(chars.font_color)
     if out.gradient is None and chars.HasField("tsd_fill"):
@@ -1054,21 +1122,27 @@ def _read_para_style(objects: dict[int, Any], style_id: int, out: TextStyle) -> 
         if _has(style, "char_properties"):
             _read_char_properties(style.char_properties, out)
 
-        if not align_found and _has(style, "para_properties"):
+        if _has(style, "para_properties"):
             paras = style.para_properties
-            if paras.HasField("alignment"):
+            if not align_found and paras.HasField("alignment"):
                 # The enum serialises as a name like "TATvalue2".
                 digits = "".join(c for c in str(paras.alignment) if c.isdigit())
                 if digits:
                     out.align = ALIGNMENT_NAMES.get(int(digits), "left")
                     align_found = True
+            # An empty line_spacing message is Keynote's "1.0 lines".
+            if out.line_spacing is None and paras.HasField("line_spacing"):
+                spacing = paras.line_spacing
+                if spacing.HasField("amount"):
+                    mode = _enum_name(spacing, "mode", spacing.mode) if spacing.HasField("mode") else "kRelativeLineSpacing"
+                    out.line_spacing = (mode, float(spacing.amount))
+            if out.space_before is None and paras.HasField("space_before"):
+                out.space_before = float(paras.space_before)
+            if out.space_after is None and paras.HasField("space_after"):
+                out.space_after = float(paras.space_after)
 
-        if (
-            out.font_size is not None
-            and (out.color is not None or out.gradient is not None)
-            and align_found
-        ):
-            return
+        # Read to the root: line spacing and paragraph spacing usually live
+        # in the theme's styles, above the leaf that names size and colour.
         try:
             parent = style.super.parent
             current_id = int(parent.identifier) if parent.identifier else None
@@ -1170,6 +1244,8 @@ def _char_run_css(
         size = float(chars.font_size)
         if size > 0 and size != base.font_size:
             css["font-size"] = _relative_size(size, base.font_size)
+    if chars.HasField("tracking") and float(chars.tracking) != (base.tracking or 0.0):
+        css["letter-spacing"] = tracking_css(float(chars.tracking))
     if chars.HasField("superscript"):
         shift = _enum_name(chars, "superscript", chars.superscript)
         if shift in ("kSuperscript", "kSubscript"):
@@ -1426,6 +1502,10 @@ def styled_text_to_html(
                 align=own.align,
                 color=own.color or base.color,
                 gradient=base.gradient,
+                tracking=own.tracking or 0.0,
+                line_spacing=own.line_spacing,
+                space_before=own.space_before,
+                space_after=own.space_after,
             )
         return resolved[style_id]
 
@@ -1441,7 +1521,11 @@ def styled_text_to_html(
             blocks[-1] += f"</li></{tag}>"
 
     pos = 0
-    for line in text.split("\n"):
+    # Keynote adds one paragraph's space after to the next one's space
+    # before; CSS would collapse two margins into the larger, so the whole
+    # gap goes on the later paragraph as its margin-top.
+    gap_after = 0.0
+    for index, line in enumerate(text.split("\n")):
         line_start, line_end = pos, pos + len(line)
         pos = line_end + 1
         style_id = _table_at(para_styles, line_start)
@@ -1461,6 +1545,14 @@ def styled_text_to_html(
                 block_css["color"] = para.color
             if para.align != base.align:
                 block_css["text-align"] = para.align
+            if (para.tracking or 0.0) != (base.tracking or 0.0):
+                block_css["letter-spacing"] = tracking_css(para.tracking)
+            line_height = line_height_css(para.line_spacing, para.font_size)
+            if line_height != line_height_css(base.line_spacing, base.font_size):
+                block_css["line-height"] = line_height
+        para_size = para.font_size or base.font_size or DEFAULT_FONT_SIZE
+        gap = gap_after + ((para.space_before or 0.0) if index > 0 else 0.0)
+        gap_after = para.space_after or 0.0
         decoration = _para_decoration_css(objects, style_id)
         underlined = decoration.pop("text-decoration", None) is not None
         block_css.update(decoration)
@@ -1551,6 +1643,8 @@ def styled_text_to_html(
         for ended in [key for key in counters if key >= plain_level and line.strip()]:
             del counters[ended]
         close_lists(0)
+        if gap > 0.05:
+            block_css["margin-top"] = f"{gap / para_size:.4g}em"
         if block_css:
             blocks.append(f"<p{_style_attr(block_css)}>{inner or '<br>'}</p>")
         else:
@@ -2321,6 +2415,10 @@ class Importer:
                 )
             elif style.color:
                 inline["color"] = style.color
+            # Stated inline so the theme's role defaults (a title's tighter
+            # tracking and leading) never restyle text Keynote laid out.
+            inline["line-height"] = line_height_css(style.line_spacing, font_size)
+            inline["letter-spacing"] = tracking_css(style.tracking)
 
             element = self._base(box, z, "text")
             element["opacity"] = shape_paint.opacity
@@ -2600,7 +2698,7 @@ class Importer:
         ):
             source = pathsource.scalar_path_source
             if int(source.type) == 0:
-                element = self._base(box, z, "shape")
+                element = self._base(_outset_for_stroke(box, style), z, "shape")
                 element.update(
                     {
                         "shape": "rect",
@@ -2707,7 +2805,7 @@ class Importer:
             and not style.arrow_end
             and is_axis_aligned_rectangle(path_msg)
         ):
-            element = self._base(box, z, "shape")
+            element = self._base(_outset_for_stroke(box, style), z, "shape")
             element.update(
                 {
                     "shape": "rect",
@@ -3042,6 +3140,30 @@ class Importer:
                 animation_type = str(build.attributes.animationAttributes.animation_type)
             except AttributeError:
                 continue
+            if animation_type == "Action":
+                move = _motion_path_offset(build)
+                if move is not None:
+                    duration = float(build.attributes.animationAttributes.duration or 1.0)
+                    timeline.append(
+                        {
+                            # Never written to a deck, so it takes no id from
+                            # the counter that numbers every object after it.
+                            "id": MOVE_ACTION,
+                            "trigger": {
+                                "on": "afterPrev" if automatic else "click",
+                                "ref": None,
+                                "delay": round(delay * 1000),
+                            },
+                            "action": {
+                                "type": MOVE_ACTION,
+                                "targets": list(targets),
+                                "dx": move[0],
+                                "dy": move[1],
+                                "duration": duration,
+                            },
+                        }
+                    )
+                continue
             action = (
                 "appear"
                 if animation_type == "In"
@@ -3084,6 +3206,160 @@ DEFAULT_FONT_SIZE = 36.0
 
 """Shown in an empty imported text box, mirroring what Keynote displays."""
 PLACEHOLDER_TEXT = "Text"
+
+
+# A Keynote "Move" build, held in a slide's timeline only until
+# `split_at_moves` turns it into a Morph; never written to a deck.
+MOVE_ACTION = "_move"
+
+
+def _motion_path_offset(build: Any) -> tuple[float, float] | None:
+    """How far a Move build carries its object: the motion path's end point
+    relative to its start. Morph moves in a straight line, so a curved path
+    keeps only where it ends."""
+    try:
+        source = build.attributes.action_motionPathSource
+        subpaths = list(source.editable_bezier_path_source.subpaths)
+    except AttributeError:
+        return None
+    nodes = [node for subpath in subpaths for node in subpath.nodes]
+    if len(nodes) < 2:
+        return None
+    start, end = nodes[0].nodePoint, nodes[-1].nodePoint
+    dx, dy = float(end.x) - float(start.x), float(end.y) - float(start.y)
+    if source.horizontalFlip:
+        dx = -dx
+    if source.verticalFlip:
+        dy = -dy
+    if abs(dx) < 0.01 and abs(dy) < 0.01:
+        return None
+    return round(dx, 2), round(dy, 2)
+
+
+def split_at_moves(slide: dict[str, Any], report: "Report | None" = None) -> list[dict[str, Any]]:
+    """Turn a slide's Keynote Move builds into Morphs to copies of the slide.
+
+    The editor's builds show and hide objects; only Morph, between two
+    slides, moves them. So the builds up to a Move stay on this slide, and
+    the slide continues on a copy that Morphs in from it: everything that is
+    on screen at that moment, with the moved objects in their new places,
+    followed by the builds that come after. Moves that follow the first one
+    automatically ride the same transition. Each object keeps one morphId
+    across the copies, so only what moved animates.
+
+    Left alone, a Move was dropped, and the objects that make room for it
+    built in on top of the one that should have moved out of their way.
+    """
+    if not any(entry["action"]["type"] == MOVE_ACTION for entry in slide["timeline"]):
+        return [slide]
+    for element in slide["elements"]:
+        element["morphId"] = element.get("morphId") or element["id"]
+
+    out: list[dict[str, Any]] = []
+    current = slide
+    part = 1
+    while True:
+        entries = current["timeline"]
+        first = next((i for i, e in enumerate(entries) if e["action"]["type"] == MOVE_ACTION), None)
+        if first is None:
+            out.append(current)
+            return out
+        last = first + 1
+        while (
+            last < len(entries)
+            and entries[last]["action"]["type"] == MOVE_ACTION
+            and entries[last]["trigger"]["on"] != "click"
+        ):
+            last += 1
+        before, moves, after = entries[:first], entries[first:last], entries[last:]
+
+        # What is on screen when the Move starts.
+        visibility = [e for e in before + after if e["action"]["type"] in ("appear", "disappear")]
+        decided: set[str] = set()
+        hidden: set[str] = set()
+        for entry in visibility:
+            target = entry["action"]["target"]
+            if target not in decided:
+                decided.add(target)
+                if entry["action"]["type"] == "appear":
+                    hidden.add(target)
+        visible = {element["id"] for element in current["elements"]} - hidden
+        shown_here = set(visible)
+        for entry in before:
+            kind, target = entry["action"]["type"], entry["action"].get("target")
+            if kind == "appear":
+                visible.add(target)
+                shown_here.add(target)
+            elif kind == "disappear":
+                visible.discard(target)
+        # Objects whose build comes after the Move belong to the copy only:
+        # here, with no build left to hide them, they would show from the start.
+        every_element = current["elements"]
+        current["elements"] = [e for e in every_element if e["id"] in shown_here]
+        current["timeline"] = before
+        out.append(current)
+
+        part += 1
+        suffix = f"-m{part}"
+        shift: dict[str, tuple[float, float]] = {}
+        for move in moves:
+            for target in move["action"]["targets"]:
+                dx, dy = shift.get(target, (0.0, 0.0))
+                shift[target] = (dx + move["action"]["dx"], dy + move["action"]["dy"])
+        appears_later = {
+            e["action"]["target"] for e in after
+            if e["action"]["type"] == "appear"
+        }
+        kept = [
+            element for element in every_element
+            if element["id"] in visible or element["id"] in appears_later
+        ]
+        ids = {element["id"]: element["id"] + suffix for element in kept}
+        elements = []
+        for element in kept:
+            moved = copy.deepcopy(element)
+            moved["id"] = ids[element["id"]]
+            dx, dy = shift.get(element["id"], (0.0, 0.0))
+            moved["x"] = round(moved["x"] + dx, 2)
+            moved["y"] = round(moved["y"] + dy, 2)
+            elements.append(moved)
+
+        timeline = []
+        for entry in after:
+            action = entry["action"]
+            if action["type"] == MOVE_ACTION:
+                targets = [ids[t] for t in action["targets"] if t in ids]
+                if not targets:
+                    continue
+                action = {**action, "targets": targets}
+            elif action.get("target") not in ids:
+                continue
+            else:
+                action = {**action, "target": ids[action["target"]]}
+            trigger = dict(entry["trigger"])
+            if trigger.get("ref"):
+                trigger["ref"] = ids.get(trigger["ref"])
+            timeline.append({"id": entry["id"] + suffix, "trigger": trigger, "action": action})
+
+        duration = max(move["action"]["duration"] for move in moves)
+        nxt = {
+            key: copy.deepcopy(value) for key, value in current.items()
+            if key not in ("elements", "timeline")
+        }
+        nxt.update(
+            {
+                "id": slide["id"] + suffix,
+                "elements": elements,
+                "timeline": timeline,
+                "morphFromPrevious": True,
+                "morphDuration": max(100, min(5000, round(duration * 1000))),
+            }
+        )
+        if report is not None:
+            report.warnings.append(
+                f"{slide['name']}: a Move build continues on the next slide as a Morph"
+            )
+        current = nxt
 
 
 def _normalise_angle(degrees: float) -> float:
@@ -3529,7 +3805,7 @@ def import_key(
                 node = objects[int(node_ref.identifier)]
                 slide_obj = objects[int(node.slide.identifier)]
                 skipped = bool(getattr(node, "isSkipped", False))
-                slides.append(importer.convert_slide(slide_obj, index, skipped))
+                slides.extend(split_at_moves(importer.convert_slide(slide_obj, index, skipped), report))
             except Exception as exc:
                 # One unreadable slide must not cost the other ninety-five.
                 report.warnings.append(f"Slide {index + 1} failed: {exc}")

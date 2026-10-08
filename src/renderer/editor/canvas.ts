@@ -74,7 +74,8 @@ import {
 } from './pendingUploads.js';
 import { dragImageSource, type ClipboardImageSource } from '@shared/clipboardImages.js';
 import type { ImportedAsset } from '@shared/ipc.js';
-import { newComment, openCommentsPopover, openCount } from './comments.js';
+import { commentFocus, commentHighlightsShown, onCommentHighlightsChange, openComments } from './comments.js';
+import { openThreadCount } from '@shared/comments.js';
 import { reportRenderDivergences } from './renderInvariants.js';
 import { isWebBridgeAction } from '@shared/webBridge.js';
 import { reportSelectionViolations } from './selectionInvariants.js';
@@ -89,7 +90,7 @@ import {
   snapResize,
   spacingGuides,
 } from './snapping.js';
-import { sameSlideIgnoringNotes, type EditorStore } from './store.js';
+import { sameSlideDrawing, type EditorStore } from './store.js';
 
 export type TableSelection = {
   elementId: string;
@@ -915,6 +916,10 @@ export class EditorCanvas {
     document.addEventListener('selectionchange', () => this.captureTextSelection());
 
     store.subscribe(() => this.render());
+    onCommentHighlightsChange(() => {
+      const slide = this.store.slide;
+      if (slide) this.drawOverlay(this.store.get().deck, slide.elements, this.store.get().selection);
+    });
     this.render();
   }
 
@@ -950,7 +955,7 @@ export class EditorCanvas {
     // them.
     if (
       slide === this.renderedSlide
-      || (this.renderedSlide !== null && sameSlideIgnoringNotes(this.renderedSlide, slide))
+      || (this.renderedSlide !== null && sameSlideDrawing(this.renderedSlide, slide))
     ) {
       this.renderedSlide = slide;
       this.rescale();
@@ -1854,28 +1859,40 @@ export class EditorCanvas {
       }
     }
 
-    // Comment badges: a small bubble pinned to the top-right corner of any
-    // element that carries comments. Always visible (comments are useless if
-    // you cannot find them), counter-scaled like the handles, clickable even
-    // though the overlay itself is pointer-events: none.
-    for (const el of elements) {
-      const open = openCount(el.comments);
-      if ((el.comments?.length ?? 0) === 0) continue;
-      const bubble = document.createElement('div');
-      bubble.className = `element-comment${open > 0 ? '' : ' resolved'}`;
-      bubble.textContent = open > 0 ? String(open) : '✓';
-      bubble.title = open > 0
-        ? `${open} open comment${open === 1 ? '' : 's'}`
-        : 'All comments resolved';
-      bubble.style.left = `${el.x + el.w}px`;
-      bubble.style.top = `${el.y}px`;
-      bubble.style.setProperty('--inv', String(1 / this.scale));
-      bubble.addEventListener('pointerdown', (e) => e.stopPropagation());
-      bubble.addEventListener('click', (e) => {
-        e.stopPropagation();
-        this.openElementComments(el.id, bubble.getBoundingClientRect());
-      });
-      frag.appendChild(bubble);
+    // Comment highlights: whatever carries an open thread, and whatever the
+    // open comment popover is about (drawn stronger). Under the selection
+    // outlines, and inert: threads open from the right-click menu only.
+    {
+      const slide = this.store.slide;
+      const focus = commentFocus();
+      const shown = commentHighlightsShown();
+      const onThisSlide = focus !== null && focus.slideId === slide?.id;
+      const slideOpen = shown && slide ? openThreadCount(slide.comments) : 0;
+      if (slide && (slideOpen > 0 || (onThisSlide && !focus.elementId))) {
+        const frame = document.createElement('div');
+        frame.className = `comment-mark comment-slide-mark${onThisSlide && !focus.elementId ? ' hot' : ''}`;
+        frame.style.width = `${deck.canvas.w}px`;
+        frame.style.height = `${deck.canvas.h}px`;
+        frame.style.setProperty('--inv', String(1 / this.scale));
+        if (slideOpen > 0) frame.dataset.count = String(slideOpen);
+        frag.appendChild(frame);
+      }
+      for (const el of elements) {
+        const open = shown ? openThreadCount(el.comments) : 0;
+        const hot = onThisSlide && focus.elementId === el.id;
+        if (open === 0 && !hot) continue;
+        const mark = document.createElement('div');
+        mark.className = `comment-mark${hot ? ' hot' : ''}`;
+        mark.dataset.elementId = el.id;
+        mark.style.left = `${el.x}px`;
+        mark.style.top = `${el.y}px`;
+        mark.style.width = `${el.w}px`;
+        mark.style.height = `${el.h}px`;
+        if (el.rot && !hasEndpoints(el)) mark.style.transform = `rotate(${el.rot}deg)`;
+        mark.style.setProperty('--inv', String(1 / this.scale));
+        if (open > 0) mark.dataset.count = String(open);
+        frag.appendChild(mark);
+      }
     }
 
     // In mask mode, show the full frame faintly outside the crop window so it
@@ -3001,50 +3018,36 @@ export class EditorCanvas {
     if (slide) this.drawOverlay(deck, slide.elements, selection);
   }
 
-  /** Custom context menu: right-click selects the element and offers actions. */
   /**
-   * Comments popover for one element. Public so the context menu's "Add
-   * comment…" can open it; the badge drawn by drawOverlay uses it too.
+   * The comment threads on one object (or, with no id, everything on the
+   * current slide), opened from the right-click menu beside `at`.
    */
-  openElementComments(elementId: string, anchor?: DOMRect): void {
+  openComments(elementId: string | null, at?: { x: number; y: number }, opts: { compose?: boolean; threadId?: string } = {}): void {
     const slideId = this.store.slide?.id;
     if (!slideId) return;
-    const find = (deck: Deck) =>
-      deck.slides.find((s) => s.id === slideId)?.elements.find((e) => e.id === elementId);
-    const current = () => find(this.store.get().deck)?.comments ?? [];
-    // Anchor on the element's on-screen box when the caller has no badge rect.
-    const node = this.slideLayer.querySelector<HTMLElement>(
-      `[data-element-id="${CSS.escape(elementId)}"]`,
-    );
-    const at = anchor ?? node?.getBoundingClientRect();
-    if (!at) return;
-    const mutate = (label: string, fn: (el: SlideElement) => void) => {
-      this.store.commit((deck) => {
-        const el = find(deck);
-        if (el) fn(el);
-      }, { label });
-      pop.refresh(current());
-    };
-    const pop = openCommentsPopover({
-      anchor: at,
-      title: 'Comments',
-      comments: current(),
-      onAdd: (text) => mutate('Add comment', (el) => {
-        (el.comments ??= []).push(newComment(text));
-      }),
-      onResolve: (id, resolved) => mutate(resolved ? 'Resolve comment' : 'Reopen comment', (el) => {
-        const comment = el.comments?.find((c) => c.id === id);
-        if (comment) comment.resolved = resolved;
-      }),
-      onDelete: (id) => mutate('Delete comment', (el) => {
-        el.comments = (el.comments ?? []).filter((c) => c.id !== id);
-        if (el.comments.length === 0) delete el.comments;
-      }),
+    const node = elementId
+      ? this.slideLayer.querySelector<HTMLElement>(`[data-element-id="${CSS.escape(elementId)}"]`)
+      : null;
+    const anchor = at ?? node?.getBoundingClientRect() ?? this.lastContextPoint ?? this.stage.getBoundingClientRect();
+    openComments({
+      store: this.store,
+      slideId,
+      ...(elementId ? { elementId } : {}),
+      anchor,
+      ...opts,
+      reveal: (target) => {
+        if (target.elementId) this.store.select([target.elementId]);
+      },
     });
   }
 
+  /** Where the last right-click landed: a slide's comments open there. */
+  private lastContextPoint: { x: number; y: number } | null = null;
+
+  /** Custom context menu: right-click selects the element and offers actions. */
   private onContextMenu(ev: MouseEvent): void {
     ev.preventDefault();
+    this.lastContextPoint = { x: ev.clientX, y: ev.clientY };
     document.getElementById('ctx-menu')?.remove();
     if (!this.contextActions) return;
 

@@ -77,13 +77,14 @@ def text_shape(storage_id, x, y, w, h):
     """)
 
 
-def title_slide():
+def title_slide_objects():
     """Slide 1: an 80pt bold title over 48pt light author lines.
 
     Paragraph-style entries without an object (author lines 2 and 3, the
     blank line) continue the style before them; affiliation numbers are a
     superscript character style; the title's second half un-bolds the bold
-    face with `bold: false`.
+    face with `bold: false`. The title styles track -2%; the affiliations
+    have 24pt of space after them, which sets the footnote apart.
     """
     text = ("MilliVid: Hierarchical Latents\n\nAlice*1, Bob*1\nCarol2\n\n"
             "1MIT          2TRI\n*Equal contribution")
@@ -103,13 +104,45 @@ def title_slide():
         20: para_style(80, "HelveticaNeue-Bold", bold=True),
         21: para_style(48, "HelveticaNeue-Bold", bold=True),
         22: para_style(48, "HelveticaNeue-Light"),
-        23: para_style(40, "HelveticaNeue-Light"),
+        23: para_style(40, "HelveticaNeue-Light", extra="para_properties { space_after: 24 }"),
         30: char_style("bold: false"),
         31: char_style("superscript: kSuperscript"),
         40: text_shape(10, 95, 72, 1730, 779),
     }
+    objects[20].char_properties.tracking = -0.02
+    objects[21].char_properties.tracking = -0.02
+    return objects
+
+
+def title_slide():
+    objects = title_slide_objects()
     base = k.resolve_text_style(objects, objects[40])
     return k.styled_text_to_html(objects, objects[40], base)
+
+
+def title_slide_element():
+    """The same box as the importer writes it: the element's own style."""
+    objects = title_slide_objects()
+    with tempfile.TemporaryDirectory() as tmp:
+        importer = k.Importer(objects, {}, None, Path(tmp), k.Report(), canvas=(1920, 1080))
+        [element] = importer._convert_shape(objects[40], importer._box(k.find_geometry(objects[40]), (0, 0)), 0)
+    return {"html": element["html"], "style": element["style"]}
+
+
+def line_spacing_body():
+    """Slide 53: 0.9-line body text with a 20pt gap before its second part."""
+    text = "Existing datasets fall short\nWe generate our own"
+    objects = {
+        10: storage(text, paras=[(0, 20), (text.index("We"), 21)]),
+        20: para_style(48, "HelveticaNeue", extra="para_properties { line_spacing { amount: 0.9 } }"),
+        21: para_style(48, "HelveticaNeue",
+                       extra="para_properties { line_spacing { amount: 0.9 } space_before: 24 }"),
+        40: text_shape(10, 95, 216, 1730, 400),
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        importer = k.Importer(objects, {}, None, Path(tmp), k.Report(), canvas=(1920, 1080))
+        [element] = importer._convert_shape(objects[40], importer._box(k.find_geometry(objects[40]), (0, 0)), 0)
+    return {"html": element["html"], "style": element["style"]}
 
 
 def rollout_list():
@@ -221,8 +254,82 @@ def partial_underline():
     return k.styled_text_to_html(objects, objects[40], k.resolve_text_style(objects, objects[40]))
 
 
+def outlined_frame():
+    """Slide 13: a 5pt red frame drawn as a plain four-corner bezier path,
+    sized exactly to the 200x200 reconstruction it highlights."""
+    corners = " ".join(
+        f"elements {{ type: {kind} points {{ x: {x} y: {y} }} }}"
+        for kind, x, y in (("moveTo", 0, 0), ("lineTo", 200, 0),
+                           ("lineTo", 200, 200), ("lineTo", 0, 200)))
+    objects = {
+        50: message(TSWP.ShapeStyleArchive, """
+            super { shape_properties {
+                fill { }
+                stroke {
+                    color { model: rgb r: 0.932 g: 0.135 b: 0.047 a: 1 }
+                    width: 5 cap: ButtCap join: MiterJoin miter_limit: 4
+                    pattern { type: TSDSolidPattern phase: 0 count: 0 }
+                }
+            } }
+        """),
+        60: message(TSWP.ShapeInfoArchive, f"""
+            super {{
+                super {{ geometry {{
+                    position {{ x: 97 y: 767 }} size {{ width: 200 height: 200 }} angle: 0.0
+                }} }}
+                style {{ identifier: 50 }}
+                pathsource {{ bezier_path_source {{
+                    naturalSize {{ width: 200 height: 200 }}
+                    path {{ {corners} elements {{ type: closeSubpath }} }}
+                }} }}
+            }}
+            is_text_box: false
+        """),
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        importer = k.Importer(objects, {}, None, Path(tmp), k.Report(), canvas=(1920, 1080))
+        [element] = importer._convert_shape(
+            objects[60], importer._box(k.find_geometry(objects[60]), (0, 0)), 0)
+    return {key: element[key] for key in ("shape", "x", "y", "w", "h", "stroke", "strokeWidth", "fill")}
+
+
+def move_build():
+    """Slide 11: "Latents 16x16" and its column move left on a click (two
+    Keynote Move builds, the second automatic) to make room for 8x8."""
+    def box(ident, x):
+        return {"id": ident, "type": "text", "x": x, "y": 500.0, "w": 180.0, "h": 60.0,
+                "rot": 0.0, "z": 0, "html": ident}
+
+    def build(ident, on, kind, target):
+        return {"id": ident, "trigger": {"on": on, "ref": None, "delay": 0},
+                "action": {"type": kind, "target": target, "value": None}}
+
+    def move(on, targets, dx):
+        return {"id": k.MOVE_ACTION, "trigger": {"on": on, "ref": None, "delay": 0},
+                "action": {"type": k.MOVE_ACTION, "targets": targets, "dx": dx, "dy": 0.0,
+                           "duration": 1.0}}
+
+    slide = {
+        "id": "slide-11", "name": "Slide 11", "notes": "n",
+        "background": {"color": "#ffffff", "image": None},
+        "elements": [box("title", 95.0), box("gt", 440.0), box("label16", 447.0),
+                     box("recon16", 440.0), box("label8", 331.0)],
+        "timeline": [build("b1", "click", "appear", "gt"),
+                     build("b2", "click", "appear", "label16"),
+                     build("b3", "withPrev", "appear", "recon16"),
+                     move("click", ["label16"], -346.0),
+                     move("afterPrev", ["recon16"], -343.0),
+                     build("b4", "click", "appear", "label8")],
+    }
+    return k.split_at_moves(slide)
+
+
 print(json.dumps({
+    "moveBuild": move_build(),
+    "outlinedFrame": outlined_frame(),
     "titleSlide": title_slide(),
+    "titleSlideElement": title_slide_element(),
+    "lineSpacingBody": line_spacing_body(),
     "rolloutList": rollout_list(),
     "rotatedMiddle": rotated_label("middle"),
     "rotatedTop": rotated_label("top"),

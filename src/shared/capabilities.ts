@@ -431,8 +431,9 @@ export function capabilities(): Capability[] {
       what: 'Review comments, on a slide or on a single object.',
       when: 'Humans leave you instructions here. Read them first, reply, resolve what you finish.',
       notes: [
-        'comments: [{id, author, text, ts, resolved}] lives on a slide and on any element.',
-        'CLI: `slide-agent comments <deck>` lists every comment with its 1-based slide number; --resolve <id> marks one done; --add <text> --slide/--element <id> replies.',
+        'comments: [{id, author, text, ts, resolved, parentId?}] lives on a slide and on any element. A thread is a root comment and the replies whose parentId names it; the root’s resolved is the thread’s.',
+        'CLI: `slide-agent comments <deck>` lists every comment with its 1-based slide number; --resolve <id> marks its thread done; --add <text> --reply <id> answers in a thread; --add <text> --slide/--element <id> starts one.',
+        'Comments change only through the updateComments operation, which merges by comment id; replaceElement, replaceSlide and setSlideProperties leave a target’s comments alone.',
         'In a live collaboration session: await window.agent.seeComments() and await window.agent.resolveComment(id); GET /api/comments serves the same rows.',
         'Resolve what you acted on. Never delete a human’s comment.',
       ],
