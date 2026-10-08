@@ -4687,3 +4687,15 @@ button.ghost:hover:not(:disabled) { color: var(--text); background: transparent;
   transform: translateX(-50%);
   pointer-events: none;
 }
+
+/* Harper spelling/grammar marks on the box being edited (spellcheck.ts). */
+::highlight(deckwerk-spelling) {
+  text-decoration: underline wavy #e5484d;
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+}
+::highlight(deckwerk-grammar) {
+  text-decoration: underline wavy #3e8ef7;
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+}
