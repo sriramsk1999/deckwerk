@@ -254,7 +254,39 @@ def partial_underline():
     return k.styled_text_to_html(objects, objects[40], k.resolve_text_style(objects, objects[40]))
 
 
+def move_build():
+    """Slide 11: "Latents 16x16" and its column move left on a click (two
+    Keynote Move builds, the second automatic) to make room for 8x8."""
+    def box(ident, x):
+        return {"id": ident, "type": "text", "x": x, "y": 500.0, "w": 180.0, "h": 60.0,
+                "rot": 0.0, "z": 0, "html": ident}
+
+    def build(ident, on, kind, target):
+        return {"id": ident, "trigger": {"on": on, "ref": None, "delay": 0},
+                "action": {"type": kind, "target": target, "value": None}}
+
+    def move(on, targets, dx):
+        return {"id": k.MOVE_ACTION, "trigger": {"on": on, "ref": None, "delay": 0},
+                "action": {"type": k.MOVE_ACTION, "targets": targets, "dx": dx, "dy": 0.0,
+                           "duration": 1.0}}
+
+    slide = {
+        "id": "slide-11", "name": "Slide 11", "notes": "n",
+        "background": {"color": "#ffffff", "image": None},
+        "elements": [box("title", 95.0), box("gt", 440.0), box("label16", 447.0),
+                     box("recon16", 440.0), box("label8", 331.0)],
+        "timeline": [build("b1", "click", "appear", "gt"),
+                     build("b2", "click", "appear", "label16"),
+                     build("b3", "withPrev", "appear", "recon16"),
+                     move("click", ["label16"], -346.0),
+                     move("afterPrev", ["recon16"], -343.0),
+                     build("b4", "click", "appear", "label8")],
+    }
+    return k.split_at_moves(slide)
+
+
 print(json.dumps({
+    "moveBuild": move_build(),
     "titleSlide": title_slide(),
     "titleSlideElement": title_slide_element(),
     "lineSpacingBody": line_spacing_body(),

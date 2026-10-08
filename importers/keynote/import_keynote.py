@@ -24,6 +24,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import copy
 import functools
 import hashlib
 import html
@@ -3115,6 +3116,30 @@ class Importer:
                 animation_type = str(build.attributes.animationAttributes.animation_type)
             except AttributeError:
                 continue
+            if animation_type == "Action":
+                move = _motion_path_offset(build)
+                if move is not None:
+                    duration = float(build.attributes.animationAttributes.duration or 1.0)
+                    timeline.append(
+                        {
+                            # Never written to a deck, so it takes no id from
+                            # the counter that numbers every object after it.
+                            "id": MOVE_ACTION,
+                            "trigger": {
+                                "on": "afterPrev" if automatic else "click",
+                                "ref": None,
+                                "delay": round(delay * 1000),
+                            },
+                            "action": {
+                                "type": MOVE_ACTION,
+                                "targets": list(targets),
+                                "dx": move[0],
+                                "dy": move[1],
+                                "duration": duration,
+                            },
+                        }
+                    )
+                continue
             action = (
                 "appear"
                 if animation_type == "In"
@@ -3157,6 +3182,160 @@ DEFAULT_FONT_SIZE = 36.0
 
 """Shown in an empty imported text box, mirroring what Keynote displays."""
 PLACEHOLDER_TEXT = "Text"
+
+
+# A Keynote "Move" build, held in a slide's timeline only until
+# `split_at_moves` turns it into a Morph; never written to a deck.
+MOVE_ACTION = "_move"
+
+
+def _motion_path_offset(build: Any) -> tuple[float, float] | None:
+    """How far a Move build carries its object: the motion path's end point
+    relative to its start. Morph moves in a straight line, so a curved path
+    keeps only where it ends."""
+    try:
+        source = build.attributes.action_motionPathSource
+        subpaths = list(source.editable_bezier_path_source.subpaths)
+    except AttributeError:
+        return None
+    nodes = [node for subpath in subpaths for node in subpath.nodes]
+    if len(nodes) < 2:
+        return None
+    start, end = nodes[0].nodePoint, nodes[-1].nodePoint
+    dx, dy = float(end.x) - float(start.x), float(end.y) - float(start.y)
+    if source.horizontalFlip:
+        dx = -dx
+    if source.verticalFlip:
+        dy = -dy
+    if abs(dx) < 0.01 and abs(dy) < 0.01:
+        return None
+    return round(dx, 2), round(dy, 2)
+
+
+def split_at_moves(slide: dict[str, Any], report: "Report | None" = None) -> list[dict[str, Any]]:
+    """Turn a slide's Keynote Move builds into Morphs to copies of the slide.
+
+    The editor's builds show and hide objects; only Morph, between two
+    slides, moves them. So the builds up to a Move stay on this slide, and
+    the slide continues on a copy that Morphs in from it: everything that is
+    on screen at that moment, with the moved objects in their new places,
+    followed by the builds that come after. Moves that follow the first one
+    automatically ride the same transition. Each object keeps one morphId
+    across the copies, so only what moved animates.
+
+    Left alone, a Move was dropped, and the objects that make room for it
+    built in on top of the one that should have moved out of their way.
+    """
+    if not any(entry["action"]["type"] == MOVE_ACTION for entry in slide["timeline"]):
+        return [slide]
+    for element in slide["elements"]:
+        element["morphId"] = element.get("morphId") or element["id"]
+
+    out: list[dict[str, Any]] = []
+    current = slide
+    part = 1
+    while True:
+        entries = current["timeline"]
+        first = next((i for i, e in enumerate(entries) if e["action"]["type"] == MOVE_ACTION), None)
+        if first is None:
+            out.append(current)
+            return out
+        last = first + 1
+        while (
+            last < len(entries)
+            and entries[last]["action"]["type"] == MOVE_ACTION
+            and entries[last]["trigger"]["on"] != "click"
+        ):
+            last += 1
+        before, moves, after = entries[:first], entries[first:last], entries[last:]
+
+        # What is on screen when the Move starts.
+        visibility = [e for e in before + after if e["action"]["type"] in ("appear", "disappear")]
+        decided: set[str] = set()
+        hidden: set[str] = set()
+        for entry in visibility:
+            target = entry["action"]["target"]
+            if target not in decided:
+                decided.add(target)
+                if entry["action"]["type"] == "appear":
+                    hidden.add(target)
+        visible = {element["id"] for element in current["elements"]} - hidden
+        shown_here = set(visible)
+        for entry in before:
+            kind, target = entry["action"]["type"], entry["action"].get("target")
+            if kind == "appear":
+                visible.add(target)
+                shown_here.add(target)
+            elif kind == "disappear":
+                visible.discard(target)
+        # Objects whose build comes after the Move belong to the copy only:
+        # here, with no build left to hide them, they would show from the start.
+        every_element = current["elements"]
+        current["elements"] = [e for e in every_element if e["id"] in shown_here]
+        current["timeline"] = before
+        out.append(current)
+
+        part += 1
+        suffix = f"-m{part}"
+        shift: dict[str, tuple[float, float]] = {}
+        for move in moves:
+            for target in move["action"]["targets"]:
+                dx, dy = shift.get(target, (0.0, 0.0))
+                shift[target] = (dx + move["action"]["dx"], dy + move["action"]["dy"])
+        appears_later = {
+            e["action"]["target"] for e in after
+            if e["action"]["type"] == "appear"
+        }
+        kept = [
+            element for element in every_element
+            if element["id"] in visible or element["id"] in appears_later
+        ]
+        ids = {element["id"]: element["id"] + suffix for element in kept}
+        elements = []
+        for element in kept:
+            moved = copy.deepcopy(element)
+            moved["id"] = ids[element["id"]]
+            dx, dy = shift.get(element["id"], (0.0, 0.0))
+            moved["x"] = round(moved["x"] + dx, 2)
+            moved["y"] = round(moved["y"] + dy, 2)
+            elements.append(moved)
+
+        timeline = []
+        for entry in after:
+            action = entry["action"]
+            if action["type"] == MOVE_ACTION:
+                targets = [ids[t] for t in action["targets"] if t in ids]
+                if not targets:
+                    continue
+                action = {**action, "targets": targets}
+            elif action.get("target") not in ids:
+                continue
+            else:
+                action = {**action, "target": ids[action["target"]]}
+            trigger = dict(entry["trigger"])
+            if trigger.get("ref"):
+                trigger["ref"] = ids.get(trigger["ref"])
+            timeline.append({"id": entry["id"] + suffix, "trigger": trigger, "action": action})
+
+        duration = max(move["action"]["duration"] for move in moves)
+        nxt = {
+            key: copy.deepcopy(value) for key, value in current.items()
+            if key not in ("elements", "timeline")
+        }
+        nxt.update(
+            {
+                "id": slide["id"] + suffix,
+                "elements": elements,
+                "timeline": timeline,
+                "morphFromPrevious": True,
+                "morphDuration": max(100, min(5000, round(duration * 1000))),
+            }
+        )
+        if report is not None:
+            report.warnings.append(
+                f"{slide['name']}: a Move build continues on the next slide as a Morph"
+            )
+        current = nxt
 
 
 def _normalise_angle(degrees: float) -> float:
@@ -3602,7 +3781,7 @@ def import_key(
                 node = objects[int(node_ref.identifier)]
                 slide_obj = objects[int(node.slide.identifier)]
                 skipped = bool(getattr(node, "isSkipped", False))
-                slides.append(importer.convert_slide(slide_obj, index, skipped))
+                slides.extend(split_at_moves(importer.convert_slide(slide_obj, index, skipped), report))
             except Exception as exc:
                 # One unreadable slide must not cost the other ninety-five.
                 report.warnings.append(f"Slide {index + 1} failed: {exc}")

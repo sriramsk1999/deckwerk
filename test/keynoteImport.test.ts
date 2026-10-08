@@ -680,6 +680,11 @@ describe('keynote importer', () => {
   describe('text structures from a real talk', () => {
     let cases: {
       titleSlide: string;
+      moveBuild: Array<{
+        id: string; morphFromPrevious?: boolean; morphDuration?: number; notes: string;
+        elements: Array<{ id: string; x: number; morphId: string }>;
+        timeline: Array<{ id: string; trigger: { on: string }; action: { type: string; target: string } }>;
+      }>;
       titleSlideElement: { html: string; style: Record<string, string> };
       lineSpacingBody: { html: string; style: Record<string, string> };
       rolloutList: { html: string; paragraphSpacing: number | null };
@@ -740,6 +745,32 @@ describe('keynote importer', () => {
       // second paragraph's margin, and nothing goes above the first.
       expect(lineSpacingBody.style).toMatchObject({ 'line-height': '1.08', 'letter-spacing': 'normal' });
       expect(lineSpacingBody.html).toBe('<p>Existing datasets fall short</p><p style="margin-top: 0.5em">We generate our own</p>');
+    });
+
+    it('turns a Move build into a Morph to a copy of the slide', () => {
+      const { moveBuild } = load();
+      // Builds only show and hide; Morph is what moves. Dropped, the Move
+      // left "Latents 16x16" in place and 8x8 built in on top of it.
+      expect(moveBuild.map((slide) => slide.id)).toEqual(['slide-11', 'slide-11-m2']);
+      const [before, after] = moveBuild;
+      // Up to the Move: only what has appeared by then, with its builds.
+      expect(before.elements.map((e) => e.id)).toEqual(['title', 'gt', 'label16', 'recon16']);
+      expect(before.timeline.map((e) => e.id)).toEqual(['b1', 'b2', 'b3']);
+      expect(before.morphFromPrevious).toBeUndefined();
+      // The copy: everything on screen at the Move, moved by both Move builds
+      // (the automatic one rides the same transition), paired by morphId.
+      expect(after).toMatchObject({ morphFromPrevious: true, morphDuration: 1000, notes: 'n' });
+      const at = Object.fromEntries(after.elements.map((e) => [e.morphId, e]));
+      expect(at.label16.x).toBe(101);
+      expect(at.recon16.x).toBe(97);
+      expect(at.gt.x).toBe(440);
+      expect(after.elements.every((e) => e.id === `${e.morphId}-m2`)).toBe(true);
+      expect(before.elements.every((e) => e.morphId === e.id)).toBe(true);
+      // What builds after the Move builds on the copy, still hidden until then.
+      expect(after.timeline).toEqual([
+        expect.objectContaining({ id: 'b4-m2', trigger: expect.objectContaining({ on: 'click' }),
+          action: expect.objectContaining({ type: 'appear', target: 'label8-m2' }) }),
+      ]);
     });
 
     it('writes run styles the browser can read, quotes and all', () => {
