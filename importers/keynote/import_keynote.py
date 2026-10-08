@@ -916,6 +916,47 @@ class TextStyle:
     color: str | None = None
     gradient: str | None = None
     horizontal_padding: float = 8.0
+    # Character spacing as a fraction of the size (Keynote's "tracking").
+    tracking: float | None = None
+    # The paragraph's line spacing as Keynote states it: (mode, amount).
+    line_spacing: tuple[str, float] | None = None
+    space_before: float | None = None
+    space_after: float | None = None
+
+
+# The line height Keynote gives Helvetica Neue and its other system faces at
+# "1.0 lines": the face's ascent plus descent, ~1.2 of the size.
+KEYNOTE_LINE_HEIGHT = 1.2
+
+
+def line_height_css(spacing: tuple[str, float] | None, font_size: float | None) -> str:
+    """A unitless CSS line-height for a Keynote line spacing at a size.
+
+    Unitless, so it scales with the font when auto-fit shrinks the box.
+    """
+    natural = KEYNOTE_LINE_HEIGHT
+    if spacing is not None:
+        mode, amount = spacing
+        size = font_size or DEFAULT_FONT_SIZE
+        if mode == "kRelativeLineSpacing" and amount > 0:
+            natural = KEYNOTE_LINE_HEIGHT * amount
+        elif mode == "kExactLineSpacing" and amount > 0:
+            natural = amount / size
+        elif mode == "kMinimumLineSpacing":
+            natural = max(natural, amount / size)
+        elif mode == "kMaximumLineSpacing" and amount > 0:
+            natural = min(natural, amount / size)
+        elif mode == "kSpaceBetweenLineSpacing":
+            natural += max(0.0, amount) / size
+    return f"{natural:.4g}"
+
+
+def tracking_css(tracking: float | None) -> str:
+    """Keynote tracking as CSS letter-spacing; `normal` when there is none, so
+    a theme's title letter-spacing never tightens imported text."""
+    if not tracking:
+        return "normal"
+    return f"{tracking:.4g}em"
 
 
 def resolve_text_style(objects: dict[int, Any], shape: Any) -> TextStyle:
@@ -1024,6 +1065,8 @@ def _read_char_properties(chars: Any, out: TextStyle) -> None:
         out.font_name = str(chars.font_name) or None
     if out.bold is None and chars.HasField("bold"):
         out.bold = bool(chars.bold)
+    if out.tracking is None and chars.HasField("tracking"):
+        out.tracking = float(chars.tracking)
     if out.color is None and chars.HasField("font_color"):
         out.color = color_to_hex(chars.font_color)
     if out.gradient is None and chars.HasField("tsd_fill"):
@@ -1054,21 +1097,27 @@ def _read_para_style(objects: dict[int, Any], style_id: int, out: TextStyle) -> 
         if _has(style, "char_properties"):
             _read_char_properties(style.char_properties, out)
 
-        if not align_found and _has(style, "para_properties"):
+        if _has(style, "para_properties"):
             paras = style.para_properties
-            if paras.HasField("alignment"):
+            if not align_found and paras.HasField("alignment"):
                 # The enum serialises as a name like "TATvalue2".
                 digits = "".join(c for c in str(paras.alignment) if c.isdigit())
                 if digits:
                     out.align = ALIGNMENT_NAMES.get(int(digits), "left")
                     align_found = True
+            # An empty line_spacing message is Keynote's "1.0 lines".
+            if out.line_spacing is None and paras.HasField("line_spacing"):
+                spacing = paras.line_spacing
+                if spacing.HasField("amount"):
+                    mode = _enum_name(spacing, "mode", spacing.mode) if spacing.HasField("mode") else "kRelativeLineSpacing"
+                    out.line_spacing = (mode, float(spacing.amount))
+            if out.space_before is None and paras.HasField("space_before"):
+                out.space_before = float(paras.space_before)
+            if out.space_after is None and paras.HasField("space_after"):
+                out.space_after = float(paras.space_after)
 
-        if (
-            out.font_size is not None
-            and (out.color is not None or out.gradient is not None)
-            and align_found
-        ):
-            return
+        # Read to the root: line spacing and paragraph spacing usually live
+        # in the theme's styles, above the leaf that names size and colour.
         try:
             parent = style.super.parent
             current_id = int(parent.identifier) if parent.identifier else None
@@ -1170,6 +1219,8 @@ def _char_run_css(
         size = float(chars.font_size)
         if size > 0 and size != base.font_size:
             css["font-size"] = _relative_size(size, base.font_size)
+    if chars.HasField("tracking") and float(chars.tracking) != (base.tracking or 0.0):
+        css["letter-spacing"] = tracking_css(float(chars.tracking))
     if chars.HasField("superscript"):
         shift = _enum_name(chars, "superscript", chars.superscript)
         if shift in ("kSuperscript", "kSubscript"):
@@ -1426,6 +1477,10 @@ def styled_text_to_html(
                 align=own.align,
                 color=own.color or base.color,
                 gradient=base.gradient,
+                tracking=own.tracking or 0.0,
+                line_spacing=own.line_spacing,
+                space_before=own.space_before,
+                space_after=own.space_after,
             )
         return resolved[style_id]
 
@@ -1441,7 +1496,11 @@ def styled_text_to_html(
             blocks[-1] += f"</li></{tag}>"
 
     pos = 0
-    for line in text.split("\n"):
+    # Keynote adds one paragraph's space after to the next one's space
+    # before; CSS would collapse two margins into the larger, so the whole
+    # gap goes on the later paragraph as its margin-top.
+    gap_after = 0.0
+    for index, line in enumerate(text.split("\n")):
         line_start, line_end = pos, pos + len(line)
         pos = line_end + 1
         style_id = _table_at(para_styles, line_start)
@@ -1461,6 +1520,14 @@ def styled_text_to_html(
                 block_css["color"] = para.color
             if para.align != base.align:
                 block_css["text-align"] = para.align
+            if (para.tracking or 0.0) != (base.tracking or 0.0):
+                block_css["letter-spacing"] = tracking_css(para.tracking)
+            line_height = line_height_css(para.line_spacing, para.font_size)
+            if line_height != line_height_css(base.line_spacing, base.font_size):
+                block_css["line-height"] = line_height
+        para_size = para.font_size or base.font_size or DEFAULT_FONT_SIZE
+        gap = gap_after + ((para.space_before or 0.0) if index > 0 else 0.0)
+        gap_after = para.space_after or 0.0
         decoration = _para_decoration_css(objects, style_id)
         underlined = decoration.pop("text-decoration", None) is not None
         block_css.update(decoration)
@@ -1551,6 +1618,8 @@ def styled_text_to_html(
         for ended in [key for key in counters if key >= plain_level and line.strip()]:
             del counters[ended]
         close_lists(0)
+        if gap > 0.05:
+            block_css["margin-top"] = f"{gap / para_size:.4g}em"
         if block_css:
             blocks.append(f"<p{_style_attr(block_css)}>{inner or '<br>'}</p>")
         else:
@@ -2321,6 +2390,10 @@ class Importer:
                 )
             elif style.color:
                 inline["color"] = style.color
+            # Stated inline so the theme's role defaults (a title's tighter
+            # tracking and leading) never restyle text Keynote laid out.
+            inline["line-height"] = line_height_css(style.line_spacing, font_size)
+            inline["letter-spacing"] = tracking_css(style.tracking)
 
             element = self._base(box, z, "text")
             element["opacity"] = shape_paint.opacity

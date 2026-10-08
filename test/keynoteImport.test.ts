@@ -680,6 +680,8 @@ describe('keynote importer', () => {
   describe('text structures from a real talk', () => {
     let cases: {
       titleSlide: string;
+      titleSlideElement: { html: string; style: Record<string, string> };
+      lineSpacingBody: { html: string; style: Record<string, string> };
       rolloutList: { html: string; paragraphSpacing: number | null };
       rotatedMiddle: Record<'x' | 'y' | 'w' | 'h' | 'cx' | 'cy', number>;
       rotatedTop: Record<'x' | 'y' | 'w' | 'h' | 'cx' | 'cy', number>;
@@ -719,6 +721,25 @@ describe('keynote importer', () => {
       // Affiliation marks are the editor's own superscript.
       expect(titleSlide).toContain('Alice*<span style="vertical-align: super; font-size: 0.7em">1</span>');
       expect(titleSlide).toContain('<span style="vertical-align: super; font-size: 0.7em">1</span>MIT');
+    });
+
+    it('keeps Keynote\'s spacing: tracking, line spacing and space between paragraphs', () => {
+      const { titleSlideElement, lineSpacingBody } = load();
+      // Stated on the element, so the theme's role-title defaults (tighter
+      // tracking, 1.08 leading) cannot squeeze a title Keynote laid out:
+      // that turned slide 1's author block into condensed, cramped lines.
+      expect(titleSlideElement.style).toMatchObject({ 'line-height': '1.2', 'letter-spacing': '-0.02em' });
+      const blocks = titleSlideElement.html.match(/<p[^>]*>.*?<\/p>/g)!;
+      // The author lines track normally; only the title is tightened.
+      expect(blocks.find((block) => block.includes('Alice'))).toContain('letter-spacing: normal');
+      // The affiliations' 24pt space after sets the footnote apart, as a
+      // margin in em of the 40pt line so auto-fit scales it too.
+      expect(blocks.find((block) => block.includes('Equal contribution'))).toContain('margin-top: 0.6em');
+      expect(blocks.filter((block) => block.includes('margin'))).toHaveLength(1);
+      // 0.9 lines of a 1.2 natural line height; a space before becomes the
+      // second paragraph's margin, and nothing goes above the first.
+      expect(lineSpacingBody.style).toMatchObject({ 'line-height': '1.08', 'letter-spacing': 'normal' });
+      expect(lineSpacingBody.html).toBe('<p>Existing datasets fall short</p><p style="margin-top: 0.5em">We generate our own</p>');
     });
 
     it('writes run styles the browser can read, quotes and all', () => {

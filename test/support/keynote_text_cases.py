@@ -77,13 +77,14 @@ def text_shape(storage_id, x, y, w, h):
     """)
 
 
-def title_slide():
+def title_slide_objects():
     """Slide 1: an 80pt bold title over 48pt light author lines.
 
     Paragraph-style entries without an object (author lines 2 and 3, the
     blank line) continue the style before them; affiliation numbers are a
     superscript character style; the title's second half un-bolds the bold
-    face with `bold: false`.
+    face with `bold: false`. The title styles track -2%; the affiliations
+    have 24pt of space after them, which sets the footnote apart.
     """
     text = ("MilliVid: Hierarchical Latents\n\nAlice*1, Bob*1\nCarol2\n\n"
             "1MIT          2TRI\n*Equal contribution")
@@ -103,13 +104,45 @@ def title_slide():
         20: para_style(80, "HelveticaNeue-Bold", bold=True),
         21: para_style(48, "HelveticaNeue-Bold", bold=True),
         22: para_style(48, "HelveticaNeue-Light"),
-        23: para_style(40, "HelveticaNeue-Light"),
+        23: para_style(40, "HelveticaNeue-Light", extra="para_properties { space_after: 24 }"),
         30: char_style("bold: false"),
         31: char_style("superscript: kSuperscript"),
         40: text_shape(10, 95, 72, 1730, 779),
     }
+    objects[20].char_properties.tracking = -0.02
+    objects[21].char_properties.tracking = -0.02
+    return objects
+
+
+def title_slide():
+    objects = title_slide_objects()
     base = k.resolve_text_style(objects, objects[40])
     return k.styled_text_to_html(objects, objects[40], base)
+
+
+def title_slide_element():
+    """The same box as the importer writes it: the element's own style."""
+    objects = title_slide_objects()
+    with tempfile.TemporaryDirectory() as tmp:
+        importer = k.Importer(objects, {}, None, Path(tmp), k.Report(), canvas=(1920, 1080))
+        [element] = importer._convert_shape(objects[40], importer._box(k.find_geometry(objects[40]), (0, 0)), 0)
+    return {"html": element["html"], "style": element["style"]}
+
+
+def line_spacing_body():
+    """Slide 53: 0.9-line body text with a 20pt gap before its second part."""
+    text = "Existing datasets fall short\nWe generate our own"
+    objects = {
+        10: storage(text, paras=[(0, 20), (text.index("We"), 21)]),
+        20: para_style(48, "HelveticaNeue", extra="para_properties { line_spacing { amount: 0.9 } }"),
+        21: para_style(48, "HelveticaNeue",
+                       extra="para_properties { line_spacing { amount: 0.9 } space_before: 24 }"),
+        40: text_shape(10, 95, 216, 1730, 400),
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        importer = k.Importer(objects, {}, None, Path(tmp), k.Report(), canvas=(1920, 1080))
+        [element] = importer._convert_shape(objects[40], importer._box(k.find_geometry(objects[40]), (0, 0)), 0)
+    return {"html": element["html"], "style": element["style"]}
 
 
 def rollout_list():
@@ -223,6 +256,8 @@ def partial_underline():
 
 print(json.dumps({
     "titleSlide": title_slide(),
+    "titleSlideElement": title_slide_element(),
+    "lineSpacingBody": line_spacing_body(),
     "rolloutList": rollout_list(),
     "rotatedMiddle": rotated_label("middle"),
     "rotatedTop": rotated_label("top"),
