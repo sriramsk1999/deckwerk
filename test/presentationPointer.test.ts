@@ -1,7 +1,11 @@
 // @vitest-environment jsdom
 
-import { beforeEach, describe, expect, it } from 'vitest';
-import { selectionPreventsAdvance } from '../src/renderer/player/presentationPointer.js';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  eventOnVideo,
+  selectionPreventsAdvance,
+  showVideoControlsOnHover,
+} from '../src/renderer/player/presentationPointer.js';
 
 describe('presentation pointer navigation', () => {
   beforeEach(() => {
@@ -33,5 +37,43 @@ describe('presentation pointer navigation', () => {
     window.getSelection()!.addRange(range);
 
     expect(selectionPreventsAdvance()).toBe(false);
+  });
+});
+
+describe('presentation video controls', () => {
+  let uninstall: () => void = () => {};
+
+  beforeEach(() => {
+    document.body.innerHTML = '<div id="stage"><video id="clip"></video><p id="words">Text</p></div>';
+    uninstall = showVideoControlsOnHover();
+  });
+  afterEach(() => uninstall());
+
+  const fire = (type: string, target: Element, relatedTarget: Element | null = null) => {
+    const event = new MouseEvent(type, { bubbles: true, relatedTarget });
+    target.dispatchEvent(event);
+    return event;
+  };
+
+  it('gives a hovered video its controls and takes them away again', () => {
+    const clip = document.getElementById('clip') as HTMLVideoElement;
+    expect(clip.controls).toBe(false);
+    fire('pointerover', clip);
+    expect(clip.controls).toBe(true);
+    fire('pointerout', clip, document.getElementById('words'));
+    expect(clip.controls).toBe(false);
+  });
+
+  it('leaves a video that was authored with controls as it was', () => {
+    const clip = document.getElementById('clip') as HTMLVideoElement;
+    clip.controls = true;
+    fire('pointerover', clip);
+    fire('pointerout', clip, document.getElementById('words'));
+    expect(clip.controls).toBe(true);
+  });
+
+  it('lets a click on a video belong to the video, not to navigation', () => {
+    expect(eventOnVideo(fire('click', document.getElementById('clip')!))).toBe(true);
+    expect(eventOnVideo(fire('click', document.getElementById('words')!))).toBe(false);
   });
 });
