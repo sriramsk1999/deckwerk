@@ -1,0 +1,42 @@
+/*
+ * DeckWerk menu → Interface font → System font (uiFont.ts).
+ *
+ * The chrome draws its words in `--mono`; this file swaps that for the
+ * system's interface font and pins what has to line up in columns back to
+ * the monospace: timecodes, colour values, rail slide numbers, build step
+ * numbers, field units, rulers and canvas measurements, code, and the
+ * wordmark. It overrides by specificity rather than by editing upstream's
+ * rules, so it holds whatever order the stylesheets load in.
+ */
+:root {
+  --mono-fixed: "Monaspace Krypton", monospace;
+}
+
+:root[data-ui-font="system"] {
+  --mono: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+:root[data-ui-font="system"] :is(
+  .mono,
+  .rail-num,
+  .canvas-ruler-label,
+  .measure-label,
+  .color-picker-values input,
+  .eyedropper-readout,
+  .field-unit,
+  .build-overview-step,
+  .build-line-text,
+  .update-notes code,
+  .update-notes pre,
+  .ask-agent-prompt,
+  .brand-button,
+  .about-mark,
+  .welcome-mark
+) {
+  font-family: var(--mono-fixed);
+}
+
+/* Numbers that change in place keep their width. */
+:root[data-ui-font="system"] :is(.field input, #status) {
+  font-variant-numeric: tabular-nums;
+}

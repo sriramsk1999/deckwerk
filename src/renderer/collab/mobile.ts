@@ -6,6 +6,7 @@ import './collab.css';
 import '../lightTheme.css';
 import './mobile.css';
 import { applyUiTheme } from '../uiTheme.js';
+import { applyUiFont } from '../uiFont.js';
 import { emptyDeck, type Deck, type Slide } from '@shared/deck.js';
 import { setIdSuffix } from '@shared/geometry.js';
 import { commentThreads, findComment, openThreadCount, type CommentThread } from '@shared/comments.js';
@@ -33,6 +34,7 @@ import { bindSwipe, RemoteReceiver } from './remoteControl.js';
 import { rememberShell, shellUrl } from './mobileShell.js';
 
 applyUiTheme();
+applyUiFont();
 
 /**
  * The phone client: a hosted deck in the hand rather than at a desk.

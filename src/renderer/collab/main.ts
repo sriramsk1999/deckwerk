@@ -4,6 +4,7 @@ import '../editor/editor.css';
 import './collab.css';
 import '../lightTheme.css';
 import { applyUiTheme } from '../uiTheme.js';
+import { applyUiFont } from '../uiFont.js';
 import { applyUiScale } from '../uiScale.js';
 import { emptyDeck } from '@shared/deck.js';
 import { setIdSuffix } from '@shared/geometry.js';
@@ -91,6 +92,7 @@ import { askAgentPrompt, type ServerTutorialInfo } from '@shared/tutorial.js';
 import { openServerTutorial, tutorialUrl } from './tutorialBar.js';
 
 applyUiTheme();
+applyUiFont();
 applyUiScale();
 
 /**

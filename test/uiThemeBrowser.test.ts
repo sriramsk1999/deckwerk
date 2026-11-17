@@ -22,7 +22,9 @@ import { collabClientDir } from './support/collabClient.js';
  * Appearance → Light in the DeckWerk menu turns the chrome light (the slide
  * keeps its own theme), the menu then ticks Light, and the choice survives a
  * reload. In both themes headings are plain text and one accent marks what
- * is active, with no green or amber decoration.
+ * is active, with no green or amber decoration. Likewise Interface font →
+ * System font: the chrome's words change face, what must line up in columns
+ * stays monospace, and the choice survives a reload.
  */
 const DECK_ID = 'light';
 
@@ -96,5 +98,48 @@ describe.skipIf(!electronBinary)('light mode', () => {
     await editor.evaluate('location.reload()');
     await eventually(async () => editor!.evaluate<string | undefined>('document.documentElement.dataset.uiTheme'),
       'theme lost on reload', (theme) => theme === 'light');
+  });
+
+  it('sets the chrome in the system font from the DeckWerk menu, across a reload', { timeout: 120_000 }, async () => {
+    workDir = await mkdtemp(join(tmpdir(), 'ui-font-'));
+    const decksRoot = join(workDir, 'decks');
+    const deckDir = join(decksRoot, DECK_ID);
+    const clientDir = await collabClientDir();
+    const profileDir = join(workDir, 'electron-profile');
+    await mkdir(deckDir, { recursive: true });
+    await mkdir(profileDir, { recursive: true });
+    await saveDeck(deckDir, emptyDeck('Font'));
+    server = await startCollabServer({ rootDir: decksRoot, clientDir, host: '127.0.0.1', port: 0 });
+    browser = await launchBrowser(`http://127.0.0.1:${server.port}/?deck=${DECK_ID}&name=Font`, profileDir);
+    const target = await findTarget(browser.debugPort, (c) => c.url.includes(`deck=${DECK_ID}`), browser.log);
+    editor = await Cdp.connect(target.webSocketDebuggerUrl!);
+    const ready = () => editor!.evaluate<boolean>(
+      `Boolean(document.querySelector('.brand-button') && document.querySelector('.rail-num') && document.querySelector('#side-tabs button'))`,
+    );
+    await eventually(ready, 'editor chrome not ready');
+    const fontOf = (selector: string) =>
+      editor!.evaluate<string>(`getComputedStyle(document.querySelector(${JSON.stringify(selector)})).fontFamily`);
+
+    // Monospace by default.
+    expect(await fontOf('#side-tabs button')).toContain('Monaspace');
+    expect(await fontOf('#status')).toContain('Monaspace');
+
+    await editor.click('.brand-button', 'the DeckWerk menu');
+    await editor.evaluate(
+      `[...document.querySelectorAll('[role="group"][aria-label="Interface font"] [role="menuitemradio"]')]
+        .find((i) => i.textContent === 'System font').click()`,
+    );
+    expect(await editor.evaluate<string>('document.documentElement.dataset.uiFont')).toBe('system');
+    expect(await fontOf('#side-tabs button')).toContain('system-ui');
+    expect(await fontOf('#status')).toContain('system-ui');
+    expect(await fontOf('.rail-num')).toContain('Monaspace');
+    expect(await fontOf('.brand-button')).toContain('Monaspace');
+
+    await editor.evaluate('location.reload()');
+    await eventually(async () => editor!.evaluate<string | undefined>('document.documentElement.dataset.uiFont'),
+      'font lost on reload', (font) => font === 'system');
+    await eventually(ready, 'editor chrome not ready after reload');
+    expect(await fontOf('#side-tabs button')).toContain('system-ui');
+    expect(await fontOf('.rail-num')).toContain('Monaspace');
   });
 });

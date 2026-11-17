@@ -4,6 +4,7 @@ import './editor.css';
 import '../collab/collab.css';
 import '../lightTheme.css';
 import { applyUiTheme } from '../uiTheme.js';
+import { applyUiFont } from '../uiFont.js';
 import { applyUiScale } from '../uiScale.js';
 import { applyAgentOperations, applyAgentTransaction, type AgentOperation } from '@shared/agent.js';
 import type { Deck, SlideElement } from '@shared/deck.js';
@@ -79,6 +80,7 @@ import { showUploadDialog } from './uploadDialog.js';
 import { reconcileOffline } from './remoteSync.js';
 
 applyUiTheme();
+applyUiFont();
 applyUiScale();
 
 /**

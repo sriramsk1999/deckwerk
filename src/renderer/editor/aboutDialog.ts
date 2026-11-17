@@ -1,5 +1,6 @@
 import { appearanceMenuSection } from '../uiTheme.js';
 import { interfaceSizeMenuSection } from '../uiScale.js';
+import { interfaceFontMenuSection } from '../uiFont.js';
 import { createToolbarPicker } from './exportPicker.js';
 import { updateMenuEntries } from './updateDialog.js';
 import { ASK_AGENT_LABEL, showAskAgentDialog } from './askAgentDialog.js';
@@ -10,7 +11,7 @@ const ABOUT_DIALOG_ID = 'deckwerk-about';
  * The product wordmark at the leading edge of editor toolbars. It opens the
  * app menu: About, Check for Updates (desktop only), Question? Ask your agent!
  * (when the host can say where its tutorial is), and the editor chrome's
- * appearance — settings that are set once rather than reached for while
+ * appearance, size and font — settings that are set once rather than reached for while
  * editing, so they stay out of the toolbar.
  */
 export function createDeckWerkButton(options: {
@@ -44,6 +45,7 @@ export function createDeckWerkButton(options: {
     ...ask,
     appearanceMenuSection(),
     interfaceSizeMenuSection(),
+    interfaceFontMenuSection(),
   ], { trigger: button });
 }
 
