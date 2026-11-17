@@ -3,12 +3,13 @@ import { startCollabServer, defaultClientDir, importerProblems, mediaToolProblem
 import { LocalAgentRegistry } from '../src/server/localAgents.js';
 import { headlessBrowserProblem } from '../src/cli/compileHtml.js';
 import { findShippedTutorial } from '../src/main/tutorial.js';
+import { generateSharePassword, sharePasswordLinks } from '../src/server/sharePassword.js';
 
 /**
  * Collaborative editing server:
  *   npm run collab -- <decksRootDir> [--port 5800] [--host 0.0.0.0]
  *     [--no-local-agents] [--agent-name <name>] [--access <adminLogin>]
- *     [--keep-uploads-days <n>] [--no-tutorial]
+ *     [--keep-uploads-days <n>] [--no-tutorial] [--no-password]
  *     [--tls-host <tailnet address> --tls-cert <cert.pem> --tls-key <key.pem>
  *      [--tls-port 9443] [--tailscale-socket <path>]]
  *
@@ -43,6 +44,11 @@ import { findShippedTutorial } from '../src/main/tutorial.js';
  * behaves exactly as before: no identity, every deck open to anyone who can
  * reach the port.
  *
+ * Listening beyond loopback without --access, the server asks visitors from
+ * other machines for a password: a fresh random one each start, printed with
+ * a link that carries it (sharePassword.ts). Connections from this machine,
+ * ssh tunnels included, need none. --no-password turns it off.
+ *
  * Hosts one directory of deck folders for browser clients over HTTP +
  * WebSocket: every subdirectory containing a deck.json is openable — nested
  * ones included, whose id is their path — new decks are created inside it,
@@ -66,6 +72,7 @@ let tlsHost: string | null = null;
 let tlsPort = 9443;
 let tailscaleSocket: string | undefined;
 let tutorialEnabled = true;
+let passwordEnabled = true;
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--port') port = Number(args[++i]);
   else if (args[i] === '--host') host = args[++i];
@@ -79,6 +86,7 @@ for (let i = 0; i < args.length; i++) {
   else if (args[i] === '--tls-port') tlsPort = Number(args[++i]);
   else if (args[i] === '--tailscale-socket') tailscaleSocket = args[++i];
   else if (args[i] === '--no-tutorial') tutorialEnabled = false;
+  else if (args[i] === '--no-password') passwordEnabled = false;
   else if (!args[i].startsWith('-') && !rootDir) rootDir = args[i];
 }
 const tlsFlags = [tlsCert, tlsKey, tlsHost].filter((value) => value !== null).length;
@@ -87,7 +95,7 @@ if (!rootDir || Number.isNaN(port) || !(keepUploadsDays >= 0) || (accessAdmin !=
   process.stderr.write(
     'usage: npm run collab -- <decksRootDir> [--port 5800] [--host 0.0.0.0] '
     + '[--no-local-agents] [--agent-name <name>] '
-    + '[--access <adminLogin>] [--keep-uploads-days <n>] [--no-tutorial] '
+    + '[--access <adminLogin>] [--keep-uploads-days <n>] [--no-tutorial] [--no-password] '
     + '[--tls-host <tailnet address> --tls-cert <cert.pem> --tls-key <key.pem> [--tls-port 9443] '
     + '[--tailscale-socket <path>]]\n',
   );
@@ -121,6 +129,11 @@ if (problems.length > 0) {
   process.exit(1);
 }
 
+// --access has identities of its own, and a loopback-only server has no
+// visitors from elsewhere to ask.
+const loopbackOnly = host === '127.0.0.1' || host === 'localhost' || host === '::1';
+const sharePassword = passwordEnabled && !accessAdmin && !loopbackOnly ? generateSharePassword() : null;
+
 const localAgents = localAgentsEnabled ? new LocalAgentRegistry({ name: agentName }) : undefined;
 const server = await startCollabServer({
   rootDir: resolve(rootDir),
@@ -130,6 +143,7 @@ const server = await startCollabServer({
   localAgents,
   accessControl: accessAdmin ? { admin: accessAdmin } : undefined,
   keepUploadsDays,
+  ...(sharePassword ? { sharePassword: { password: sharePassword } } : {}),
   ...(tutorialDir ? { tutorialDir } : {}),
   tls: tlsHost && tlsCert && tlsKey
     ? { host: tlsHost, port: tlsPort, certFile: tlsCert, keyFile: tlsKey, tailscaleSocket }
@@ -144,7 +158,17 @@ process.stdout.write(`${JSON.stringify({
   localAgents: Boolean(localAgents),
   tutorial: tutorialDir,
   urls: server.urls,
+  password: Boolean(sharePassword),
 })}\n`);
+if (sharePassword) {
+  process.stdout.write(
+    `\nPassword for visitors (new each start): ${sharePassword}\n`
+    + `Share link:\n${sharePasswordLinks(server.urls, sharePassword).map((link) => `  ${link}\n`).join('')}`
+    + 'Connections from this machine (ssh tunnels too) need no password. --no-password turns it off.\n\n',
+  );
+} else if (!accessAdmin && !loopbackOnly) {
+  process.stderr.write('warning: --no-password: anyone who can reach this port can open, edit and download every deck.\n');
+}
 if (!clientDir) {
   process.stderr.write('note: dist/collab not found — API/WS only (use the vite dev client)\n');
 }

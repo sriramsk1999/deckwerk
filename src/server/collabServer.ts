@@ -110,6 +110,7 @@ import { deckAssetListing, restoreTrashedAssets, trashDeckAssets } from './asset
 import { CLIPBOARD_ID, ClipboardStash } from './clipboardStash.js';
 import { checkWebPage } from '../cli/renderSlides.js';
 import { installTutorial } from '../main/tutorial.js';
+import { createSharePasswordGate, type SharePasswordOptions } from './sharePassword.js';
 import {
   FEATURES_FILE,
   SERVER_TUTORIAL_DECK_ID,
@@ -359,6 +360,12 @@ export interface CollabServerOptions {
    */
   accessControl?: AccessControlConfig;
   /**
+   * A password for visitors from other machines (sharePassword.ts): without
+   * the link, the browser prompt or the cookie they leave, every request and
+   * WebSocket is turned away. Absent, the server is as open as before.
+   */
+  sharePassword?: SharePasswordOptions;
+  /**
    * Called when the host requests the session end (POST /api/end from
    * loopback in a hosted session). The owner tears the server down; the
    * endpoint itself only notifies peers.
@@ -532,6 +539,7 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
   const accessControl = options.accessControl
     ? { admin: normalizeLogin(options.accessControl.admin) }
     : null;
+  const sharePasswordGate = options.sharePassword ? createSharePasswordGate(options.sharePassword) : null;
   // Everyone the server has ever identified, for share-dialog autocomplete.
   const userDirectory = accessControl ? new UserDirectory(join(resolve(options.rootDir), 'users.json')) : null;
   const rooms = new Map<string, Room>();
@@ -1544,6 +1552,7 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
   let unsubscribeSharedAgent: (() => void) | undefined;
 
   const serveRequest = (request: IncomingMessage, response: ServerResponse): void => {
+    if (sharePasswordGate && !sharePasswordGate.admitHttp(request, response)) return;
     void handleHttp(request, response).catch((error) => {
       const text = `server error: ${error instanceof Error ? error.message : String(error)}`;
       // Every API client reads `{ error }`; a plain-text body was dropped by
@@ -4338,6 +4347,10 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
     const url = new URL(request.url ?? '/', 'http://localhost');
     if (url.pathname !== '/ws') {
       socket.destroy();
+      return;
+    }
+    if (sharePasswordGate && !sharePasswordGate.admitUpgrade(request)) {
+      socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
       return;
     }
     wss.handleUpgrade(request, socket, head, (ws) => {
